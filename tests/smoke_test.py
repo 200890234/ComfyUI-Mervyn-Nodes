@@ -52,7 +52,11 @@ rt = mod.MyLoadVideoUnderPath.RETURN_TYPES
 assert rt == ("VIDEO", "STRING", "AUDIO", "INT", "FLOAT", "INT", "INT", "FLOAT"), rt
 assert types["required"] == {}, types["required"]
 optional = types["optional"]
-assert set(optional) == {"path", "video_file", "preview", "start_time", "duration"}, optional
+assert set(optional) == {
+    "path", "video_file", "preview", "start_time", "duration",
+    "skip_first_frames", "frame_load_cap", "force_rate",
+    "custom_width", "custom_height",
+}, optional
 assert optional["video_file"][0] == [""]
 assert optional["preview"][1]["default"] is False
 
@@ -104,8 +108,8 @@ def _make_test_videos(root):
     sample = os.path.join(root, "sample.mp4")
     subprocess.run(
         [ffmpeg, *common,
-         "-f", "lavfi", "-i", "testsrc=duration=0.5:size=64x48:rate=8",
-         "-f", "lavfi", "-i", "sine=frequency=440:duration=0.5",
+         "-f", "lavfi", "-i", "testsrc=duration=2:size=64x48:rate=8",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
          "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
          "-shortest", sample],
         check=True,
@@ -126,6 +130,7 @@ with tempfile.TemporaryDirectory() as root2:
         print("smoke test OK (imageio-ffmpeg unavailable, skipped e2e part)")
         sys.exit(0)
 
+    import torch as th
     w, h, fps_num = 64, 48, 8
 
     video, path_out, audio, fc, fps, width, height, dur = node.load_video(
@@ -134,8 +139,8 @@ with tempfile.TemporaryDirectory() as root2:
     assert os.path.normcase(path_out) == os.path.normcase(os.path.normpath(video_path)), path_out
     assert width == w and height == h, (width, height)
     assert abs(fps - fps_num) < 0.01, fps
-    assert 3 <= fc <= 5, fc  # 容器元数据/估算的回退差异容忍 ±1
-    assert 0.4 <= dur <= 0.7, dur  # 4 帧 @8fps ≈ 0.5s
+    assert 14 <= fc <= 18, fc  # 容器元数据/估算的回退差异容忍 ±1
+    assert 1.6 <= dur <= 2.4, dur  # 2s 视频
 
     # 6.8 音频输出: 波形与采样率
     assert audio is not None, "expected audio track in sample.mp4"
@@ -148,14 +153,51 @@ with tempfile.TemporaryDirectory() as root2:
     _, _, audio_silent, *_ = node.load_video("", silent_path, False, 0.0, 0.0)
     assert audio_silent is None, audio_silent
 
-    # 6.5 截取: start_time=0.25 后时长应减半
+    # 6.5 截取: start_time=0.25 后时长应减去 0.25s
     _, _, _, fc2, _, _, _, dur2 = node.load_video("", video_path, False, 0.25, 0.0)
-    assert 0.1 <= dur2 <= 0.4, dur2
-    assert 1 <= fc2 <= 3, fc2
+    assert 1.2 <= dur2 <= 2.0, dur2
+    assert 12 <= fc2 <= 16, fc2
 
     # 7. path 直接给完整视频路径(不经 Browse 选择)也能加载
     _, path3, *_ = node.load_video(video_path, "", False, 0.0, 0.0)
     assert os.path.normcase(path3) == os.path.normcase(os.path.normpath(video_path)), path3
+
+    # 8. 帧控制参数(视频为 16 帧 @8fps, 64x48)
+    # cap: 有界截取
+    v_cap, _, a_cap, fc_cap, fps_cap, wd, ht, du_cap = node.load_video(
+        "", video_path, False, 0.0, 0.0, 0, 4, 0, 0, 0)
+    assert fc_cap == 4 and abs(du_cap - 0.5) < 0.05, (fc_cap, du_cap)
+    assert a_cap is not None  # 窗口内音频仍在
+
+    # 完整加载(cap 大值触发 eager), 作为对照
+    v_full, _, _, fc_full, *_ = node.load_video(
+        "", video_path, False, 0.0, 0.0, 0, 100, 0, 0, 0)
+    assert fc_full == 16, fc_full
+
+    # skip: 跳过前 2 帧后取 4 帧, 内容应等于全量的第 2..5 帧
+    v_skip, _, _, fc_skip, *_ = node.load_video(
+        "", video_path, False, 0.0, 0.0, 2, 4, 0, 0, 0)
+    assert fc_skip == 4, fc_skip
+    full_imgs = v_full.get_components().images
+    skip_imgs = v_skip.get_components().images
+    assert th.allclose(full_imgs[2:6], skip_imgs, atol=1e-4), "skip window mismatch"
+
+    # force_rate: 8fps -> 16fps, 帧数约翻倍, 输出 fps=16
+    v_rate, _, _, fc_rate, fps_rate, *_ = node.load_video(
+        "", video_path, False, 0.0, 0.0, 0, 0, 16, 0, 0)
+    assert 30 <= fc_rate <= 34 and abs(fps_rate - 16.0) < 1e-6, (fc_rate, fps_rate)
+
+    # custom_size: 只给宽, 高按比例保持
+    v_sz, _, _, _, _, wd_sz, ht_sz, _ = node.load_video(
+        "", video_path, False, 0.0, 0.0, 0, 0, 0, 32, 0)
+    assert wd_sz == 32 and ht_sz == 48, (wd_sz, ht_sz)
+    assert v_sz.get_components().images.shape[2] == 32
+
+    # 默认参数: 惰性路径(输出 VIDEO 可取帧率/尺寸)
+    v_lazy, _, _, fc_lz, fps_lz, wd_lz, ht_lz, du_lz = node.load_video(
+        "", video_path, False, 0.0, 0.0, 0, 0, 0, 0, 0)
+    assert fc_lz == 16 and abs(fps_lz - 8.0) < 0.01 and abs(du_lz - 2.0) < 0.2, (fc_lz, fps_lz, du_lz)
+    assert wd_lz == 64 and ht_lz == 48, (wd_lz, ht_lz)
 
 # 8. MyPythonCode: 结构与执行
 pc = mod_code.MyPythonCode

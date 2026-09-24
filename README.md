@@ -47,6 +47,10 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 - `Browse`：列式浏览面板，子目录逐级向右展开（Finder 风格）；每层列出该层的子目录与视频，点击视频即选中；`..` 返回上一级，点击面板外或按 Esc 关闭
 - `video_file`：选中的视频文件（完整路径）；所有输入（path / video_file / preview / start_time / duration）均可转换为输入端口由上游驱动
 - `start_time` / `duration`：截取区间（秒），0 表示从头开始 / 播放到结尾
+- `skip_first_frames` / `frame_load_cap`：跳过前 N 帧 / 最多加载 N 帧（0 = 不限制）
+- `force_rate`：重采样到指定帧率（慢放补帧、快放丢帧），0 = 原生
+- `custom_width` / `custom_height`：加载时缩放，只填一边则保持比例
+- 帧控制参数全部默认时保持惰性加载（不解码）；任一启用时按窗口收窄后有界解码，输出的 VIDEO 同步反映重采样/缩放结果
 - `preview`：开关，打开后在节点上内嵌播放选中的视频
 
 **输出**

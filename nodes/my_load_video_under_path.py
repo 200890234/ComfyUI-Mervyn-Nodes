@@ -16,9 +16,10 @@ import os
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 # ComfyUI 官方环境自带 comfy_api/av(核心 LoadVideo 同款), 不进 requirements.txt
-from comfy_api.latest import InputImpl
+from comfy_api.latest import InputImpl, VideoComponents
 from comfy_api.latest._input_impl.video_types import AudioInput
 
 VIDEO_EXTS = {
@@ -261,6 +262,31 @@ class MyLoadVideoUnderPath:
                     "step": 0.01,
                     "tooltip": "Trim length in seconds; 0 = until the end",
                 }),
+                "skip_first_frames": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "tooltip": "Skip this many source frames after the trim window",
+                }),
+                "frame_load_cap": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "tooltip": "Max frames to load after rate conversion; 0 = no limit",
+                }),
+                "force_rate": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "tooltip": "Resample to this frame rate (frames duplicated/dropped as needed); 0 = native",
+                }),
+                "custom_width": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "tooltip": "Resize width on load; 0 = native (aspect kept if only one side is set)",
+                }),
+                "custom_height": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "tooltip": "Resize height on load; 0 = native",
+                }),
             },
         }
 
@@ -273,7 +299,9 @@ class MyLoadVideoUnderPath:
         "Outputs the VIDEO object (with audio) plus audio/ frame_count/fps/width/height/duration."
     )
 
-    def load_video(self, path="", video_file="", preview=False, start_time=0.0, duration=0.0):
+    def load_video(self, path="", video_file="", preview=False, start_time=0.0,
+                   duration=0.0, skip_first_frames=0, frame_load_cap=0,
+                   force_rate=0, custom_width=0, custom_height=0):
         file_path = (video_file or "").strip().strip('"').strip("'")
         if not file_path or file_path.startswith("("):
             # 未选择文件时, 允许直接把完整视频路径填在 path 里
@@ -288,11 +316,66 @@ class MyLoadVideoUnderPath:
 
         start = max(0.0, float(start_time or 0.0))
         length_in = float(duration) if duration and duration > 0 else 0
-        video = InputImpl.VideoFromFile(file_path, start_time=start, duration=length_in)
-        audio = _extract_audio(file_path, start, length_in)
-        frame_rate = video.get_frame_rate()
-        fps = float(frame_rate)
-        width, height = video.get_dimensions()
-        frame_count = video.get_frame_count()
-        length = video.get_duration()
-        return (video, file_path, audio, frame_count, fps, width, height, length)
+        skip = max(0, int(skip_first_frames or 0))
+        cap = max(0, int(frame_load_cap or 0))
+        rate_in = max(0, int(force_rate or 0))
+        want_w = max(0, int(custom_width or 0))
+        want_h = max(0, int(custom_height or 0))
+
+        # 注意: VideoFromFile 的 trim 语义中 duration 必须为正数
+        # (内部 min(self.__duration, ...) 会把 0 当成 0 秒窗口, 导致帧数=1)。
+        # duration<=0 表示"到结尾": 先读元数据算出剩余时长再显式传入。
+        total = float(InputImpl.VideoFromFile(file_path).get_duration())
+        length_eff = length_in if length_in > 0 else max(0.0, total - start)
+        if length_eff <= 0:
+            raise ValueError(
+                f"trim window is empty: start_time={start} beyond video length {total:.2f}s"
+            )
+
+        video = InputImpl.VideoFromFile(file_path, start_time=start, duration=length_eff)
+        src_fps = float(video.get_frame_rate())
+
+        # 所有帧控制参数均为默认值 -> 保持惰性加载, 不解码
+        if skip == 0 and cap == 0 and rate_in == 0 and want_w == 0 and want_h == 0:
+            audio = _extract_audio(file_path, start, length_eff)
+            fps = src_fps
+            width, height = video.get_dimensions()
+            return (video, file_path, audio, video.get_frame_count(), fps,
+                    width, height, video.get_duration())
+
+        # 有界解码: 先按帧控制参数收窄时间窗口, 再整体解码
+        out_rate = rate_in if rate_in > 0 else src_fps
+        eff_start = start + (skip / src_fps if src_fps > 0 else 0.0)
+        eff_dur = (cap / out_rate) if cap > 0 else max(0.0, length_eff - skip / src_fps if src_fps > 0 else length_eff)
+        probe = InputImpl.VideoFromFile(file_path, start_time=eff_start, duration=eff_dur)
+        comps = probe.get_components()  # 解码窗口内全部帧 + 对齐音频
+        images = comps.images
+
+        # 帧率重采样: 按目标速率在源帧上取索引(慢放重复/快放丢弃)
+        if rate_in > 0 and src_fps > 0 and abs(out_rate - src_fps) > 1e-6:
+            n_out = max(1, int(round(images.shape[0] * out_rate / src_fps)))
+            idx = [min(images.shape[0] - 1, int(round(i * src_fps / out_rate)))
+                   for i in range(n_out)]
+            images = images[idx]
+        if cap > 0:
+            images = images[:cap]
+        if images.shape[0] == 0:
+            raise ValueError("no frames loaded - check skip_first_frames/start_time")
+
+        # 加载时缩放(未指定的一侧保持比例)
+        cur_h, cur_w = int(images.shape[1]), int(images.shape[2])
+        new_h = want_h or cur_h
+        new_w = want_w or cur_w
+        if (new_w, new_h) != (cur_w, cur_h):
+            x = images.permute(0, 3, 1, 2)
+            x = F.interpolate(x, size=(new_h, new_w), mode="bilinear", align_corners=False)
+            images = x.permute(0, 2, 3, 1).contiguous()
+
+        fc = int(images.shape[0])
+        out_dur = fc / out_rate if out_rate > 0 else 0.0
+        rebuilt = InputImpl.VideoFromComponents(VideoComponents(
+            images=images, audio=comps.audio, frame_rate=out_rate,
+            metadata=getattr(comps, "metadata", None),
+        ))
+        return (rebuilt, file_path, comps.audio, fc, float(out_rate),
+                int(images.shape[2]), int(images.shape[1]), out_dur)
