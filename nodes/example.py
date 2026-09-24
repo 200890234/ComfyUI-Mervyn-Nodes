@@ -15,7 +15,7 @@ class ExampleNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("text",)
     FUNCTION = "run"
-    CATEGORY = "Mervyn"
+    CATEGORY = "my"
 
     def run(self, text: str):
         return (f"[Mervyn] {text}",)
