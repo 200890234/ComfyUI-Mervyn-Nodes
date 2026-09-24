@@ -1,0 +1,15 @@
+[project]
+name = "comfyui-mervyn-nodes"
+description = "Mervyn's ComfyUI custom nodes."
+version = "0.1.0"
+license = { text = "MIT" }
+dependencies = []
+
+# TODO: PublisherId 需先在 registry.comfy.org 注册（可用 GitHub 账号登录）
+[project.urls]
+Repository = "https://github.com/200890234/ComfyUI-Mervyn-Nodes"
+
+[tool.comfy]
+PublisherId = "200890234"
+DisplayName = "ComfyUI-Mervyn-Nodes"
+Icon = ""
