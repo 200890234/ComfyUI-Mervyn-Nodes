@@ -224,6 +224,7 @@ class MyLoadVideoUnderPath:
         "Video object (contains picture and audio track)",
         "Full path of the selected video file",
         "Audio track (None if the file has no audio)",
+        "Decoded video frames as IMAGE batch (lazy loads decode all frames)",
         "Total frame count",
         "Frame rate in fps",
         "Video width in pixels",
@@ -272,6 +273,11 @@ class MyLoadVideoUnderPath:
                     "min": 0,
                     "tooltip": "Max frames to load after rate conversion; 0 = no limit",
                 }),
+                "select_every_nth": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "tooltip": "Keep every Nth frame (applied after rate conversion, before frame_load_cap); 0 = keep all. Effective fps becomes force_rate/N.",
+                }),
                 "force_rate": ("INT", {
                     "default": 0,
                     "min": 0,
@@ -290,8 +296,15 @@ class MyLoadVideoUnderPath:
             },
         }
 
-    RETURN_TYPES = ("VIDEO", "STRING", "AUDIO", "INT", "FLOAT", "INT", "INT", "FLOAT")
-    RETURN_NAMES = ("video", "file_path", "audio", "frame_count", "fps", "width", "height", "duration")
+    @classmethod
+    def VALIDATE_INPUTS(cls, video_file):
+        # video_file 是动态下拉: 选项由前端按目录内容注入, 无法静态枚举。
+        # 声明此方法后 ComfyUI 跳过"值必须在列表内"的静态校验, 改由这里放行;
+        # 文件不存在等真实错误在执行期报出。
+        return True
+
+    RETURN_TYPES = ("VIDEO", "STRING", "AUDIO", "IMAGE", "INT", "FLOAT", "INT", "INT", "FLOAT")
+    RETURN_NAMES = ("video", "file_path", "audio", "video_frames", "frame_count", "fps", "width", "height", "duration")
     FUNCTION = "load_video"
     CATEGORY = "my"
     DESCRIPTION = (
@@ -301,7 +314,7 @@ class MyLoadVideoUnderPath:
 
     def load_video(self, path="", video_file="", preview=False, start_time=0.0,
                    duration=0.0, skip_first_frames=0, frame_load_cap=0,
-                   force_rate=0, custom_width=0, custom_height=0):
+                   select_every_nth=0, force_rate=0, custom_width=0, custom_height=0):
         file_path = (video_file or "").strip().strip('"').strip("'")
         if not file_path or file_path.startswith("("):
             # 未选择文件时, 允许直接把完整视频路径填在 path 里
@@ -318,6 +331,7 @@ class MyLoadVideoUnderPath:
         length_in = float(duration) if duration and duration > 0 else 0
         skip = max(0, int(skip_first_frames or 0))
         cap = max(0, int(frame_load_cap or 0))
+        nth = max(0, int(select_every_nth or 0))
         rate_in = max(0, int(force_rate or 0))
         want_w = max(0, int(custom_width or 0))
         want_h = max(0, int(custom_height or 0))
@@ -336,17 +350,25 @@ class MyLoadVideoUnderPath:
         src_fps = float(video.get_frame_rate())
 
         # 所有帧控制参数均为默认值 -> 保持惰性加载, 不解码
-        if skip == 0 and cap == 0 and rate_in == 0 and want_w == 0 and want_h == 0:
+        if skip == 0 and cap == 0 and nth == 0 and rate_in == 0 and want_w == 0 and want_h == 0:
             audio = _extract_audio(file_path, start, length_eff)
             fps = src_fps
             width, height = video.get_dimensions()
-            return (video, file_path, audio, video.get_frame_count(), fps,
+            fc = video.get_frame_count()
+            # video_frames 需要真实帧张量: 惰性路径下此时才解码(时间窗与 VIDEO 一致)
+            comps_lazy = video.get_components()
+            return (video, file_path, audio, comps_lazy.images, fc, fps,
                     width, height, video.get_duration())
 
-        # 有界解码: 先按帧控制参数收窄时间窗口, 再整体解码
+        # 有界解码: 先按帧控制参数收窄时间窗口, 再整体解码。
+        # 抽帧(nth)发生在重采样之后: 每 N 帧取 1 帧, 有效帧率 = out_rate/nth。
+        # 窗口公式 cap*nth/out_rate 保证三条路径下解码量都被 cap 精确约束。
         out_rate = rate_in if rate_in > 0 else src_fps
+        nth_eff = nth if nth > 0 else 1
         eff_start = start + (skip / src_fps if src_fps > 0 else 0.0)
-        eff_dur = (cap / out_rate) if cap > 0 else max(0.0, length_eff - skip / src_fps if src_fps > 0 else length_eff)
+        eff_dur = (cap * nth_eff / out_rate) if cap > 0 else max(
+            0.0, length_eff - skip / src_fps if src_fps > 0 else length_eff
+        )
         probe = InputImpl.VideoFromFile(file_path, start_time=eff_start, duration=eff_dur)
         comps = probe.get_components()  # 解码窗口内全部帧 + 对齐音频
         images = comps.images
@@ -357,6 +379,9 @@ class MyLoadVideoUnderPath:
             idx = [min(images.shape[0] - 1, int(round(i * src_fps / out_rate)))
                    for i in range(n_out)]
             images = images[idx]
+        # 抽帧: 每 N 帧取 1 帧
+        if nth > 1:
+            images = images[::nth]
         if cap > 0:
             images = images[:cap]
         if images.shape[0] == 0:
@@ -372,10 +397,18 @@ class MyLoadVideoUnderPath:
             images = x.permute(0, 2, 3, 1).contiguous()
 
         fc = int(images.shape[0])
-        out_dur = fc / out_rate if out_rate > 0 else 0.0
+        eff_fps = out_rate / nth_eff  # 抽帧后有效帧率(播放时长不变)
+        out_dur = fc / eff_fps if eff_fps > 0 else 0.0
+        audio = comps.audio
+        # 抽帧使视频时长不变而帧数减少, 音频按有效时长对齐截断
+        if audio is not None and out_dur > 0:
+            keep = int(round(out_dur * audio["sample_rate"]))
+            wav = audio["waveform"]
+            if keep < wav.shape[-1]:
+                audio = {"waveform": wav[..., :keep], "sample_rate": audio["sample_rate"]}
         rebuilt = InputImpl.VideoFromComponents(VideoComponents(
-            images=images, audio=comps.audio, frame_rate=out_rate,
+            images=images, audio=audio, frame_rate=eff_fps,
             metadata=getattr(comps, "metadata", None),
         ))
-        return (rebuilt, file_path, comps.audio, fc, float(out_rate),
+        return (rebuilt, file_path, audio, images, fc, float(eff_fps),
                 int(images.shape[2]), int(images.shape[1]), out_dur)

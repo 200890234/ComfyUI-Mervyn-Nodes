@@ -10,6 +10,8 @@ from .nodes.my_load_video_under_path import MyLoadVideoUnderPath  # noqa: F401 (
 from .nodes.my_python_code import MyPythonCode
 from .nodes.my_save_image import MySaveImage
 from .nodes.my_move_file import MyMoveFile
+from .nodes.my_media_browser import MyMediaBrowser
+from .nodes.my_load_image_under_path import MyLoadImageUnderPath
 
 # 节点统一使用 my 前缀, 便于搜索时过滤出自己的节点
 NODE_CLASS_MAPPINGS = {
@@ -18,6 +20,8 @@ NODE_CLASS_MAPPINGS = {
     "MyPythonCode": MyPythonCode,
     "MySaveImage": MySaveImage,
     "MyMoveFile": MyMoveFile,
+    "MyMediaBrowser": MyMediaBrowser,
+    "MyLoadImageUnderPath": MyLoadImageUnderPath,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -26,6 +30,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MyPythonCode": "My Python Code",
     "MySaveImage": "My Save Image",
     "MyMoveFile": "My Move File",
+    "MyMediaBrowser": "My Media Browser",
+    "MyLoadImageUnderPath": "My Load Image Under Path",
 }
 
 WEB_DIRECTORY = "./web"

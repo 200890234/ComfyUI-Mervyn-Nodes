@@ -16,6 +16,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COMFYUI_ROOT = r"D:\ComfyuiP"
 
 sys.path.insert(0, COMFYUI_ROOT)
+sys.path.insert(0, os.path.join(REPO, "nodes"))  # 供 my_media_browser 回退导入兄弟模块
 
 spec = importlib.util.spec_from_file_location(
     "my_load_video_under_path",
@@ -45,16 +46,30 @@ spec_move = importlib.util.spec_from_file_location(
 mod_move = importlib.util.module_from_spec(spec_move)
 spec_move.loader.exec_module(mod_move)
 
+spec_mb = importlib.util.spec_from_file_location(
+    "my_media_browser",
+    os.path.join(REPO, "nodes", "my_media_browser.py"),
+)
+mod_mb = importlib.util.module_from_spec(spec_mb)
+spec_mb.loader.exec_module(mod_mb)
+
+spec_li = importlib.util.spec_from_file_location(
+    "my_load_image_under_path",
+    os.path.join(REPO, "nodes", "my_load_image_under_path.py"),
+)
+mod_li = importlib.util.module_from_spec(spec_li)
+spec_li.loader.exec_module(mod_li)
+
 # 1. INPUT_TYPES 结构: 所有输入均为 optional(可连接), required 为空
 types = mod.MyLoadVideoUnderPath.INPUT_TYPES()
-# 1.5 输出端口结构: 含 AUDIO
+# 1.5 输出端口结构: 含 AUDIO 与 IMAGE 帧输出
 rt = mod.MyLoadVideoUnderPath.RETURN_TYPES
-assert rt == ("VIDEO", "STRING", "AUDIO", "INT", "FLOAT", "INT", "INT", "FLOAT"), rt
+assert rt == ("VIDEO", "STRING", "AUDIO", "IMAGE", "INT", "FLOAT", "INT", "INT", "FLOAT"), rt
 assert types["required"] == {}, types["required"]
 optional = types["optional"]
 assert set(optional) == {
     "path", "video_file", "preview", "start_time", "duration",
-    "skip_first_frames", "frame_load_cap", "force_rate",
+    "skip_first_frames", "frame_load_cap", "select_every_nth", "force_rate",
     "custom_width", "custom_height",
 }, optional
 assert optional["video_file"][0] == [""]
@@ -133,7 +148,7 @@ with tempfile.TemporaryDirectory() as root2:
     import torch as th
     w, h, fps_num = 64, 48, 8
 
-    video, path_out, audio, fc, fps, width, height, dur = node.load_video(
+    video, path_out, audio, frames, fc, fps, width, height, dur = node.load_video(
         root2, video_path, False, 0.0, 0.0
     )
     assert os.path.normcase(path_out) == os.path.normcase(os.path.normpath(video_path)), path_out
@@ -141,6 +156,9 @@ with tempfile.TemporaryDirectory() as root2:
     assert abs(fps - fps_num) < 0.01, fps
     assert 14 <= fc <= 18, fc  # 容器元数据/估算的回退差异容忍 ±1
     assert 1.6 <= dur <= 2.4, dur  # 2s 视频
+    # video_frames: 惰性路径下也解码, 形状 (N, H, W, 3) 且帧数与 frame_count 一致
+    assert frames.ndim == 4 and frames.shape[3] == 3, tuple(frames.shape)
+    assert frames.shape[0] == fc and frames.shape[1] == h and frames.shape[2] == w, tuple(frames.shape)
 
     # 6.8 音频输出: 波形与采样率
     assert audio is not None, "expected audio track in sample.mp4"
@@ -154,7 +172,7 @@ with tempfile.TemporaryDirectory() as root2:
     assert audio_silent is None, audio_silent
 
     # 6.5 截取: start_time=0.25 后时长应减去 0.25s
-    _, _, _, fc2, _, _, _, dur2 = node.load_video("", video_path, False, 0.25, 0.0)
+    _, _, _, _, fc2, _, _, _, dur2 = node.load_video("", video_path, False, 0.25, 0.0)
     assert 1.2 <= dur2 <= 2.0, dur2
     assert 12 <= fc2 <= 16, fc2
 
@@ -163,41 +181,56 @@ with tempfile.TemporaryDirectory() as root2:
     assert os.path.normcase(path3) == os.path.normcase(os.path.normpath(video_path)), path3
 
     # 8. 帧控制参数(视频为 16 帧 @8fps, 64x48)
-    # cap: 有界截取
-    v_cap, _, a_cap, fc_cap, fps_cap, wd, ht, du_cap = node.load_video(
-        "", video_path, False, 0.0, 0.0, 0, 4, 0, 0, 0)
+    # cap: 有界截取, video_frames 输出与帧数一致
+    v_cap, _, a_cap, fr_cap, fc_cap, fps_cap, wd, ht, du_cap = node.load_video(
+        "", video_path, False, 0.0, 0.0, 0, 4, 0, 0, 0, 0)
     assert fc_cap == 4 and abs(du_cap - 0.5) < 0.05, (fc_cap, du_cap)
     assert a_cap is not None  # 窗口内音频仍在
+    assert fr_cap.shape[0] == 4, tuple(fr_cap.shape)
 
     # 完整加载(cap 大值触发 eager), 作为对照
-    v_full, _, _, fc_full, *_ = node.load_video(
-        "", video_path, False, 0.0, 0.0, 0, 100, 0, 0, 0)
+    v_full, _, _, fr_full, fc_full, *_ = node.load_video(
+        "", video_path, False, 0.0, 0.0, 0, 100, 0, 0, 0, 0)
     assert fc_full == 16, fc_full
+    assert fr_full.shape[0] == 16, tuple(fr_full.shape)
 
     # skip: 跳过前 2 帧后取 4 帧, 内容应等于全量的第 2..5 帧
-    v_skip, _, _, fc_skip, *_ = node.load_video(
-        "", video_path, False, 0.0, 0.0, 2, 4, 0, 0, 0)
+    v_skip, _, _, fr_skip, fc_skip, *_ = node.load_video(
+        "", video_path, False, 0.0, 0.0, 2, 4, 0, 0, 0, 0)
     assert fc_skip == 4, fc_skip
     full_imgs = v_full.get_components().images
-    skip_imgs = v_skip.get_components().images
-    assert th.allclose(full_imgs[2:6], skip_imgs, atol=1e-4), "skip window mismatch"
+    assert th.allclose(full_imgs[2:6], fr_skip, atol=1e-4), "skip window mismatch"
 
     # force_rate: 8fps -> 16fps, 帧数约翻倍, 输出 fps=16
-    v_rate, _, _, fc_rate, fps_rate, *_ = node.load_video(
-        "", video_path, False, 0.0, 0.0, 0, 0, 16, 0, 0)
+    v_rate, _, _, fr_rate, fc_rate, fps_rate, *_ = node.load_video(
+        "", video_path, False, 0.0, 0.0, 0, 0, 0, 16, 0, 0)
     assert 30 <= fc_rate <= 34 and abs(fps_rate - 16.0) < 1e-6, (fc_rate, fps_rate)
+    assert fr_rate.shape[0] == fc_rate, tuple(fr_rate.shape)
 
     # custom_size: 只给宽, 高按比例保持
-    v_sz, _, _, _, _, wd_sz, ht_sz, _ = node.load_video(
-        "", video_path, False, 0.0, 0.0, 0, 0, 0, 32, 0)
+    v_sz, _, _, fr_sz, _, _, wd_sz, ht_sz, _ = node.load_video(
+        "", video_path, False, 0.0, 0.0, 0, 0, 0, 0, 32, 0)
     assert wd_sz == 32 and ht_sz == 48, (wd_sz, ht_sz)
-    assert v_sz.get_components().images.shape[2] == 32
+    assert fr_sz.shape[2] == 32 and fr_sz.shape[1] == 48, tuple(fr_sz.shape)
+
+    # select_every_nth: 每 2 帧取 1 帧 -> 8 帧, 有效帧率 4fps, 时长仍 2s
+    v_nth, _, _, fr_nth, fc_nth, fps_nth, *_ , du_nth = node.load_video(
+        "", video_path, False, 0.0, 0.0, 0, 0, 2, 0, 0, 0)
+    assert fc_nth == 8 and abs(fps_nth - 4.0) < 1e-6 and abs(du_nth - 2.0) < 0.1, (fc_nth, fps_nth, du_nth)
+    # 内容抽稀: nth=2 的第 k 帧应等于全量的第 2k 帧
+    assert th.allclose(fr_nth[0], fr_full[0], atol=1e-4) and th.allclose(fr_nth[1], fr_full[2], atol=1e-4)
+
+    # nth 与 cap 叠加: cap=4 -> 最终 4 帧
+    _, _, _, fr_nc, fc_nc, *_ = node.load_video(
+        "", video_path, False, 0.0, 0.0, 0, 4, 2, 0, 0, 0)
+    assert fc_nc == 4 and fr_nc.shape[0] == 4, (fc_nc, tuple(fr_nc.shape))
 
     # 默认参数: 惰性路径(输出 VIDEO 可取帧率/尺寸)
-    v_lazy, _, _, fc_lz, fps_lz, wd_lz, ht_lz, du_lz = node.load_video(
+    v_lazy, _, _, fr_lz, fc_lz, fps_lz, wd_lz, ht_lz, du_lz = node.load_video(
         "", video_path, False, 0.0, 0.0, 0, 0, 0, 0, 0)
     assert fc_lz == 16 and abs(fps_lz - 8.0) < 0.01 and abs(du_lz - 2.0) < 0.2, (fc_lz, fps_lz, du_lz)
     assert wd_lz == 64 and ht_lz == 48, (wd_lz, ht_lz)
+    assert fr_lz.shape[0] == fc_lz, tuple(fr_lz.shape)
 
 # 8. MyPythonCode: 结构与执行
 pc = mod_code.MyPythonCode
@@ -321,6 +354,97 @@ with tempfile.TemporaryDirectory() as mdir_src, tempfile.TemporaryDirectory() as
     try:
         node_move.move([a], "  ", False)
         raise AssertionError("empty directory should raise")
+    except ValueError:
+        pass
+
+# 11. MyMediaBrowser: 扫描结构 + 图片/视频加载
+from PIL import Image
+
+mb = mod_mb.MyMediaBrowser()
+mb_types = mb.INPUT_TYPES()
+assert set(mb_types["optional"]) == {"folder", "selected_file"}, mb_types["optional"]
+assert mod_mb.IMAGE_EXTS and ".png" in mod_mb.IMAGE_EXTS
+with tempfile.TemporaryDirectory() as broot:
+    os.makedirs(os.path.join(broot, "pics"))
+    png = os.path.join(broot, "p1.png")
+    Image.new("RGB", (8, 6), (255, 0, 0)).save(png)
+    vid = os.path.join(broot, "v1.mp4")
+    # 生成一个极小 mp4: 用 ffmpeg 若可用, 否则跳过视频分支
+    has_vid = False
+    try:
+        import imageio_ffmpeg
+        subprocess.run(
+            [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error",
+             "-f", "lavfi", "-i", "testsrc=duration=0.25:size=16x16:rate=8",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", vid],
+            check=True,
+        )
+        has_vid = True
+    except Exception:
+        pass
+    open(os.path.join(broot, "ignore.xyz"), "w").close()
+
+    data = mod_mb.scan_media(broot, "")
+    assert data["subdirs"] == ["pics"], data
+    assert data["images"] == ["p1.png"], data
+    assert "v1.mp4" in data["videos"] if has_vid else data["videos"] == [], data
+
+    r = mb.run("", png)
+    assert r[0] == os.path.normcase(os.path.normpath(png)) or r[0] == os.path.normpath(png), r[0]
+    assert r[1].shape == (1, 6, 8, 3), tuple(r[1].shape)  # (1,H,W,3) float
+    assert r[2] is None
+
+    if has_vid:
+        r2 = mb.run("", vid)
+        assert r2[1] is None and r2[2] is not None, "video branch"
+        r3 = mb.run(vid, "")  # path 直填完整路径
+        assert r3[2] is not None, "path-as-file branch"
+
+    # 目录与不支持类型
+    try:
+        mb.run("", os.path.join(broot, "ignore.xyz"))
+        raise AssertionError("unsupported ext should raise")
+    except ValueError:
+        pass
+
+# 12. MyLoadImageUnderPath: image 必选 + mask 输出
+li = mod_li.MyLoadImageUnderPath()
+li_types = li.INPUT_TYPES()
+assert "image" in li_types["required"] and li_types["required"]["image"][1].get("image_upload") is True
+assert set(li_types["optional"]) == {"folder"}
+assert li.RETURN_TYPES == ("STRING", "IMAGE", "MASK"), li.RETURN_TYPES
+with tempfile.TemporaryDirectory() as iroot:
+    p1 = os.path.join(iroot, "a.png")
+    Image.new("RGB", (10, 4), (0, 255, 0)).save(p1)  # 无 alpha -> mask 全零
+    p2 = os.path.join(iroot, "b_rgba.png")
+    Image.new("RGBA", (8, 8), (0, 0, 255, 128)).save(p2)  # alpha=0.5 -> mask=0.5
+    open(os.path.join(iroot, "b.txt"), "w").close()
+
+    fp, img, mask = li.run("", p1)
+    assert img.shape == (1, 4, 10, 3), tuple(img.shape)
+    assert abs(float(img[0, 0, 0, 1]) - 1.0) < 1e-6  # 绿色通道
+    assert mask.shape == (1, 4, 10) and float(mask.max()) == 0.0, (tuple(mask.shape), mask.max())
+    assert os.path.normcase(fp) == os.path.normcase(os.path.normpath(p1))
+
+    fp2, img2, mask2 = li.run(p2, "")
+    assert tuple(mask2.shape) == (1, 8, 8), tuple(mask2.shape)
+    assert abs(float(mask2[0, 0, 0]) - 0.5) < 0.01, float(mask2[0, 0, 0])  # 1 - 128/255
+
+    # folder 直填完整路径
+    fp3, img3, mask3 = li.run(p1, "")
+    assert img3.shape == (1, 4, 10, 3), tuple(img3.shape)
+
+    # 未选择且 folder 为空 -> 报错
+    try:
+        li.run("", "")
+        raise AssertionError("empty should raise")
+    except ValueError:
+        pass
+
+    # 非图片扩展名 -> 报错
+    try:
+        li.run("", os.path.join(iroot, "b.txt"))
+        raise AssertionError("txt should raise")
     except ValueError:
         pass
 
