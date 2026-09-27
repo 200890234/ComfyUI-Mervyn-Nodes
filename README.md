@@ -19,6 +19,7 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 |------|------|
 | `My Load Video Under Path` | 浏览任意目录（可逐层进入子目录）并加载选中的视频文件，支持节点内预览 |
 | `My Load Image Under Path` | 任意目录选图（三段式选择器 + 列式浏览面板 + 内嵌预览 + 尺寸回显），输出 IMAGE + file_path，右键 Open/Save Image |
+| `My Mask Editor` | 任意目录图片上涂蒙版（画/擦/粗细/软度/撤销/Fill/Invert/Clear），蒙版存为图片旁 `<同名>_mask.png`，输出 MASK |
 | `My Media Browser` | 节点内联网格浏览任意目录的图片/视频/子目录（视频自动播放 + 面包屑 + 分页 + 收藏目录），选中即输出 IMAGE/VIDEO |
 | `My Save Image` | 把 IMAGE 保存到任意目录，支持重名跳过/覆盖，节点上直接显示保存结果 |
 | `My Save Video to Folder` | 把 VIDEO 保存到任意目录（ComfyUI 自带 writer，兼容则流复制），文件名计数器永不覆盖 |
@@ -40,7 +41,17 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 - `folder`：任意图片目录；三段式选择器（◀ 文件名 ▶）——左右箭头同目录循环切换，中间点击弹列式浏览面板（进入子目录即更新 folder）
 - 选中即内嵌预览（高度按图片宽高比自适应，`size` 只读框显示原始宽高）；无需执行即可看到
 - 输出：`image`（1,H,W,3，EXIF 方向修正）+ `file_path`（选中文件的绝对路径，接给 `My Mask Editor`）
-- 设计说明：选中即用绝对路径，不做 input 目录桥接上传（任意目录场景）；因此不含核心 MaskEditor 菜单。**本节点不输出 MASK**——蒙版的唯一事实源是 `My Mask Editor`（接本节点的 `file_path` 涂蒙版，输出 mask），避免同一份 `<同名>_mask.png` 出现两个输出端造成歧义
+- 设计说明：选中即用绝对路径，不做 input 目录桥接上传（任意目录场景）。**本节点不输出 MASK**——蒙版的唯一事实源是 `My Mask Editor`（接本节点的 `file_path` 涂蒙版，输出 `mask`），避免同一份 `<同名>_mask.png` 出现两个输出端造成歧义
+- 因走绝对路径，本节点**不含**核心的 `Open in Mask Editor` 菜单（该功能依赖 input 目录，原因见下方 `My Mask Editor` 小节的限制说明）
+
+## My Mask Editor
+
+- `file_path`：要涂蒙版的图片（接 `My Load Image Under Path` 的 `file_path` 输出，或直接填绝对路径）
+- 节点内画布：画笔/橡皮、粗细、不透明度、软度、Undo/Redo、Fill、Invert、Clear
+- 保存：每次笔触后自动保存（防抖 800ms），写成图片同目录的 `<同名>_mask.png`（白=选中、黑=排除）
+- 输出：`mask`（1,H,W，1=选中区；未涂过则全零）+ `mask_path`（实际使用的蒙版文件，无则空）
+- 与 `My Load Image Under Path` 配合：Load Image 取 `file_path` → 本节点涂蒙版 → 输出 `mask`（两节点分工：加载归加载、蒙版归蒙版）
+- **设计说明（限制）**：核心的 MaskEditor 弹窗（右键 `Open in Mask Editor`）**无法用于任意目录**——加载走 `/view`（拒绝绝对路径与非 input 子目录），保存走 `/upload/mask`（强制写回 `input/clipspace/`）。因此本包的蒙版能力**只能是一个独立节点**：无法内嵌进 `My Load Image Under Path`，也无法像 Pixaroma 那样复用核心弹窗（那些做法的前提是图片必须位于 ComfyUI 的 input 目录内）
 
 ## My Save Video to Folder
 
