@@ -1,13 +1,16 @@
-// My Load Image Under Path - 三段式选择器(◀ 文件名 ▶) + 列式浏览面板 + 内嵌图片预览
-// + 右键菜单 Open Image / Save Image(对齐核心 LoadImage)。
+// My Load Image Under Path - core LoadImage mechanism + any-folder picker.
+// Preview & right-click menus (Open/Copy/Save Image, Open in MaskEditor) come
+// from the core frontend once node.imgs + previewMediaType are set.
+// This extension only adds: ◀ name ▶ picker + column browse panel, writing the
+// picked ABSOLUTE path into the hidden 'image' widget.
 import { app } from "../../../scripts/app.js";
-import { api } from "../../../scripts/api.js";
 
-const PAGE_DIR_CSS_ID = "mervyn-dir-panel-css"; // 与 Load Video 共用一套面板样式
 const NONE_LABEL = "(no images)";
 const ERROR_LABEL = "(error)";
 const POLL_MS = 300;
+const CSS_ID = "mervyn-load-image-css";
 
+// 三段选择器与列式浏览面板的样式(与 Load Video 保持一致的观感)
 const CSS = `
 .mervyn-browse-btn{display:block;width:100%;padding:6px 8px;background:#2a2a2a;color:#ddd;border:1px solid #444;cursor:pointer;font-size:12px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mervyn-browse-btn:hover{background:#333}
@@ -23,19 +26,18 @@ const CSS = `
 .mervyn-dir-item.selected{background:#31465e;color:#cfe4ff}
 .mervyn-dir-empty{padding:4px 6px;color:#777;font-style:italic}
 .mervyn-dir-loading{padding:8px;color:#777}
-.mervyn-img-preview img{width:100%;height:240px;object-fit:contain;background:#000;border-radius:4px;display:block}
 `;
 
 function injectStyle() {
-  if (document.getElementById(PAGE_DIR_CSS_ID)) return;
+  if (document.getElementById(CSS_ID)) return;
   const s = document.createElement("style");
-  s.id = PAGE_DIR_CSS_ID;
+  s.id = CSS_ID;
   s.textContent = CSS;
   document.head.appendChild(s);
 }
 
 function currentRoot(w) {
-  return (w.value || "").trim().replace(/^["']|["']$/g, "");
+  return (w?.value || "").trim().replace(/^["']|["']$/g, "");
 }
 
 function joinPath(dir, name) {
@@ -58,8 +60,108 @@ async function listMedia(root) {
   return data;
 }
 
+// 说明: 核心 MaskEditor 无法用于任意目录 ——
+// 其 /view 加载拒绝绝对路径与目录外 subfolder(server.py: 539/551), 保存又强制
+// 写回 input 目录。涂蒙版请使用 My Mask Editor 节点(接本节点的 file_path 输出)。
+
+// 自建右键小菜单(预览图专用): 不依赖 litegraph/其他扩展的菜单管线
+let _previewMenuEl = null;
+function showPreviewMenu(x, y, items) {
+  if (_previewMenuEl) _previewMenuEl.remove();
+  const menu = document.createElement("div");
+  menu.style.cssText =
+    "position:fixed;z-index:10002;background:#1e1e1e;border:1px solid #555;" +
+    "border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.6);padding:4px 0;" +
+    "font:12px/1.4 system-ui,sans-serif;color:#ddd;min-width:160px";
+  for (const [label, fn] of items) {
+    const it = document.createElement("div");
+    it.textContent = label;
+    it.style.cssText = "padding:5px 12px;cursor:pointer;white-space:nowrap";
+    it.onmouseenter = () => { it.style.background = "#31465e"; };
+    it.onmouseleave = () => { it.style.background = ""; };
+    it.onclick = () => { menu.remove(); _previewMenuEl = null; fn(); };
+    menu.appendChild(it);
+  }
+  menu.style.left = `${Math.min(x, window.innerWidth - 180)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - items.length * 26 - 12)}px`;
+  document.body.appendChild(menu);
+  _previewMenuEl = menu;
+  const close = (ev) => {
+    if (menu.contains(ev.target)) return;
+    menu.remove();
+    _previewMenuEl = null;
+    document.removeEventListener("mousedown", close, true);
+  };
+  setTimeout(() => document.addEventListener("mousedown", close, true), 0);
+}
+
+// Copy Image (core LoadImage parity): PNG into clipboard, transcoding non-PNG
+async function copyImageToClipboard(url) {
+  try {
+    const blob = await (await fetch(url)).blob();
+    let png = blob;
+    if (blob.type !== "image/png") {
+      const bmp = await createImageBitmap(blob);
+      const cvs = document.createElement("canvas");
+      cvs.width = bmp.width;
+      cvs.height = bmp.height;
+      cvs.getContext("2d").drawImage(bmp, 0, 0);
+      png = await new Promise((r) => cvs.toBlob(r, "image/png"));
+    }
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+  } catch (err) {
+    console.warn("[Mervyn] copy image failed:", err);
+  }
+}
+
 app.registerExtension({
   name: "Mervyn.MyLoadImageUnderPath",
+  // Right-click menu via the official new-API hook (bundle: collectNodeMenuItems
+  // -> invokeExtensions('getNodeMenuItems', node).flat()).
+  // "Open in Mask Editor" runs the same core command that the stock node uses.
+  getNodeMenuItems(node) {
+    console.debug("[Mervyn] getNodeMenuItems hook called, node =", node?.type, node?.comfyClass);
+    if ((node.comfyClass ?? node.type) !== "MyLoadImageUnderPath") return [];
+    const wImg = node.widgets?.find((w) => w.name === "image");
+    const file =
+      typeof wImg?.value === "string" && wImg.value && !wImg.value.startsWith("(")
+        ? wImg.value
+        : "";
+    if (!file) return [];
+    const url = `/mervyn/media?path=${encodeURIComponent(file)}`;
+    // New-UI menu items use {label, action}; content/callback kept for the
+    // legacy canvas menu pipeline.
+    return [
+      {
+        label: "Open Image", content: "Open Image",
+        action: () => window.open(url, "_blank"),
+        callback: () => window.open(url, "_blank"),
+      },
+      {
+        label: "Copy Image", content: "Copy Image",
+        action: () => copyImageToClipboard(
+          `/mervyn/media?path=${encodeURIComponent(file)}`),
+        callback: () => copyImageToClipboard(
+          `/mervyn/media?path=${encodeURIComponent(file)}`),
+      },
+      {
+        label: "Save Image", content: "Save Image",
+        action: () => {
+          const a = document.createElement("a");
+          a.href = `/mervyn/media?path=${encodeURIComponent(file)}`;
+          a.download = file.split(/[\\/]/).pop() || "image.png";
+          a.click();
+        },
+        callback: () => {
+          const a = document.createElement("a");
+          a.href = `/mervyn/media?path=${encodeURIComponent(file)}`;
+          a.download = file.split(/[\\/]/).pop() || "image.png";
+          a.click();
+        },
+      },
+      null,
+    ];
+  },
   beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== "MyLoadImageUnderPath") return;
     console.debug("[Mervyn] MyLoadImageUnderPath extension registered");
@@ -72,45 +174,35 @@ app.registerExtension({
 
       const wFolder = node.widgets.find((w) => w.name === "folder");
       const wImage = node.widgets.find((w) => w.name === "image");
-      if (wImage) wImage.computeSize = () => [0, -4]; // 原生下拉塌缩隐藏(仍序列化)
 
-      // 桥接: 把任意路径图片上传副本到 input/mervyn, 让核心 MaskEditor 标准流程可用。
-      // 桥接名 -> 原始绝对路径 的映射存在 node.properties.mervyn_src(随工作流保存)。
-      const srcMap = node.properties.mervyn_src || (node.properties.mervyn_src = {});
-      const baseOf = (p) => p.split(/[\\/]/).pop();
-      const uploadBridge = async (abs) => {
-        if (srcMap[abs]) return srcMap[abs];
-        const blob = await fetch(`/mervyn/media?path=${encodeURIComponent(abs)}`)
-          .then((r) => {
-            if (!r.ok) throw new Error(`fetch source failed (${r.status})`);
-            return r.blob();
-          });
-        const form = new FormData();
-        form.append("image", blob, baseOf(abs));
-        form.append("subfolder", "mervyn");
-        form.append("type", "input");
-        const res = await api.fetchApi("/upload/image", { method: "POST", body: form });
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        const bridged = data.subfolder ? `${data.subfolder}/${data.name}` : data.name;
-        srcMap[abs] = bridged;
-        return bridged;
-      };
-      const pickFile = async (abs, cell) => {
-        try {
-          wImage.value = await uploadBridge(abs);
-        } catch (err) {
-          console.warn("[Mervyn] bridge upload failed, fallback to abs path:", err);
-          wImage.value = abs; // 桥接失败时回退直读绝对路径
+      // Keep the image widget functional but out of sight; it stays in
+      // node.widgets for serialization and for the core menus.
+      if (wImage) {
+        wImage.computeSize = () => [0, -4];
+        wImage.draw = () => {};
+      }
+
+      // Mark as image node so the core draws the preview and provides
+      // Open/Copy/Save Image + Open in MaskEditor menus (core parity).
+      const setNodeImg = () => {
+        const v = typeof wImage?.value === "string" ? wImage.value : "";
+        const file = v && !v.startsWith("(") ? v : "";
+        if (file) {
+          node.previewMediaType = "image";
+          node.imgs = [
+            { src: `/mervyn/media?path=${encodeURIComponent(file)}`, filename: file },
+          ];
+        } else {
+          node.imgs = null;
         }
-        seen.file = wImage.value;
-        refreshFileUI();
-        refreshPreview();
-        node.setDirtyCanvas(true, true);
-        if (cell) showLightbox({ kind: "image", path: abs }, cell);
       };
 
-      // 三段式选择器: ◀ | 文件名(点击=浏览面板) | ▶
+      let files = []; // absolute paths of images in the current folder
+      let token = 0;
+      let timer = null;
+      const seen = { folder: wFolder?.value, file: wImage?.value };
+
+      // ---- Picker: ◀ | filename (click = browse panel) | ▶ ----
       const btn = document.createElement("button");
       btn.type = "button";
       const pickBox = document.createElement("div");
@@ -123,13 +215,12 @@ app.registerExtension({
         b.style.cssText = "flex:0 0 44px;background:#2a2a2a;color:#ddd;border:1px solid #444;cursor:pointer;font-size:13px;" +
           (dir < 0 ? "border-radius:6px 0 0 6px" : "border-radius:0 6px 6px 0");
         b.onclick = () => {
-          const vals = (wImage.options.values || []).filter(
-            (v) => typeof v === "string" && v && !v.startsWith("(")
-          );
-          if (!vals.length) return;
-          let i = vals.indexOf(wImage.value);
-          i = ((i + dir) % vals.length + vals.length) % vals.length;
-          pickFile(vals[i]);
+          if (!files.length) return;
+          let i = files.indexOf(wImage.value);
+          i = ((i + dir) % files.length + files.length) % files.length;
+          wImage.value = files[i];
+          seen.file = wImage.value;
+          applyPicked();
         };
         return b;
       };
@@ -141,131 +232,102 @@ app.registerExtension({
       const pickWidget = node.addDOMWidget("pick", "pick", pickBox);
       pickWidget.serializeValue = () => "";
 
-      // 内嵌图片预览(选中即显示, 无需执行); widget 高度按图片宽高比自适应
+      // ---- Inline preview (works for any-folder absolute paths) ----
+      const sizeBox = document.createElement("div");
+      sizeBox.style.cssText = "padding:1px 6px;color:#9ad;font:11px/1.2 system-ui,sans-serif";
+      const sizeWidget = node.addDOMWidget("size", "size", sizeBox);
+      sizeWidget.serializeValue = () => "";
+      let sizeToken = 0;
+      const updateSize = (src) => {
+        if (!src) { sizeBox.textContent = ""; return; }
+        const myToken = ++sizeToken;
+        const probe = new Image();
+        probe.onload = () => {
+          if (myToken !== sizeToken) return;
+          sizeBox.textContent = `size: ${probe.naturalWidth} × ${probe.naturalHeight} px`;
+        };
+        probe.onerror = () => {
+          if (myToken !== sizeToken) return;
+          sizeBox.textContent = "size: (failed to load)";
+        };
+        probe.src = src;
+      };
       const imgEl = document.createElement("img");
-      imgEl.style.width = "100%";
-      imgEl.style.height = "100%";
-      imgEl.style.objectFit = "contain"; // 双保险: 即便容器比例不匹配也不拉伸
-      imgEl.style.background = "#000";
-      imgEl.style.borderRadius = "4px";
-      imgEl.style.display = "none";
+      imgEl.style.cssText = "width:100%;object-fit:contain;background:#000;border-radius:4px;display:none";
       const previewWidget = node.addDOMWidget("image_preview", "image_preview", imgEl);
       previewWidget.serializeValue = () => "";
       previewWidget.computeSize = () => {
         if (imgEl.style.display === "none") return [0, -4];
         const d = node._mervyn_dims;
-        if (!d || !d.w) return [node.width, 240];
-        const h = Math.round(Math.min(480, Math.max(48, node.width * (d.h / d.w))));
+        const h = d && d.w
+          ? Math.round(Math.min(480, Math.max(48, node.width * (d.h / d.w))))
+          : 240;
         return [node.width, h];
       };
-
-      // 尺寸回显(对齐核心 LoadImage)
-      const wSize = node.addWidget("text", "size", "", () => {}, { multiline: false });
-      wSize.disabled = true;
-      wSize.serializeValue = () => node._mervyn_size || "";
       imgEl.onload = () => {
         node._mervyn_dims = { w: imgEl.naturalWidth, h: imgEl.naturalHeight };
-        node._mervyn_size = `${imgEl.naturalWidth} × ${imgEl.naturalHeight} px`;
-        wSize.value = node._mervyn_size;
         node.setSize([node.size[0], node.computeSize()[1]]);
         node.setDirtyCanvas(true, true);
       };
+      // 预览图上右键: 弹自建小菜单(不依赖 litegraph 管线, 行为可控)
+      imgEl.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const v = typeof wImage?.value === "string" ? wImage.value : "";
+        if (!v || v.startsWith("(")) return;
+        const url = `/mervyn/media?path=${encodeURIComponent(v)}`;
+        showPreviewMenu(e.clientX, e.clientY, [
+          ["Open Image", () => window.open(url, "_blank")],
+          ["Copy Image", () => copyImageToClipboard(url)],
+          ["Save Image", () => {
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = v.split(/[\\/]/).pop() || "image.png";
+            a.click();
+          }],
+          // 核心 MaskEditor 强制走 input 目录, 与任意目录互斥;
+          // 涂蒙版请使用 My Mask Editor 节点(接本节点的 file_path 输出)
+        ]);
+      });
 
-      // 控件顺序: folder, pick, image(隐藏), size, 预览
-      const order = ["folder", "pick", "image", "size", "image_preview"];
+      // Widget order: folder, pick, size, image(hidden), preview, upload widgets last
+      const order = ["folder", "pick", "size", "image", "image_preview", "file_upload"];
       node.widgets.sort((a, b) => {
         const ia = order.indexOf(a.name), ib = order.indexOf(b.name);
         return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
       });
 
-      let token = 0;
-      let timer = null;
-      const seen = { folder: wFolder.value, file: wImage.value };
-
       const refreshFileUI = () => {
-        const v = typeof wImage.value === "string" ? wImage.value : "";
-        const clean = v.split(" [")[0]; // 去掉可能的 " [temp]" 注解尾巴
-        const display = clean && !clean.startsWith("(")
-          ? `🖼 ${baseOf(clean)}`
-          : clean || "🖼 (no image)";
+        const v = typeof wImage?.value === "string" ? wImage.value : "";
+        const display = v && !v.startsWith("(")
+          ? `🖼 ${v.split(/[\\/]/).pop()}`
+          : v || "🖼 (no image)";
         btn.textContent = display;
         btn.title = `${v}\n(click to browse)`;
-      };
-
-      const refreshPreview = () => {
-        const raw = typeof wImage.value === "string" ? wImage.value : "";
-        const name = raw.split(" [")[0];
-        const ann = raw.match(/\[([a-z]+)\]\s*$/i)?.[1]?.toLowerCase() || "";
-        let src = "";
-        if (name && !name.startsWith("(")) {
-          const abs = Object.entries(srcMap).find(([, b]) => b === name)?.[0];
-          if (abs) src = `/mervyn/media?path=${encodeURIComponent(abs)}`;
-          else if (name.includes(":") || name.startsWith("\\\\")) {
-            src = `/mervyn/media?path=${encodeURIComponent(name)}`;
-          } else {
-            // 桥接副本或 MaskEditor 保存的结果: 走核心 /view
-            const type = ann === "output" ? "output" : "input";
-            src = `/view?filename=${encodeURIComponent(baseOf(name))}&type=${type}&subfolder=`;
-          }
-        }
-        if (src) {
+        // preview follows the picked file
+        if (v && !v.startsWith("(")) {
+          const src = `/mervyn/media?path=${encodeURIComponent(v)}`;
           if (imgEl.dataset.path !== src) {
             imgEl.dataset.path = src;
             imgEl.src = src;
           }
           imgEl.style.display = "";
+          updateSize(src);
         } else {
           imgEl.dataset.path = "";
           imgEl.style.display = "none";
           imgEl.removeAttribute("src");
           node._mervyn_dims = null;
-          node._mervyn_size = "";
-          wSize.value = "";
+          updateSize("");
         }
-        node.setSize([node.size[0], node.computeSize()[1]]);
+        setNodeImg();
+      };
+
+      const applyPicked = () => {
+        refreshFileUI();
         node.setDirtyCanvas(true, true);
       };
 
-      const refresh = async () => {
-        const myToken = ++token;
-        const root = currentRoot(wFolder);
-        if (!root) {
-          wImage.options.values = [NONE_LABEL];
-          wImage.value = NONE_LABEL;
-          seen.file = wImage.value;
-          refreshFileUI();
-          refreshPreview();
-          node.setDirtyCanvas(true, true);
-          return;
-        }
-        try {
-          const data = await listMedia(root);
-          if (myToken !== token) return;
-          const fulls = data.images.map((n) => joinPath(root, n));
-          wImage.options.values = fulls.length ? fulls : [NONE_LABEL];
-          if (!fulls.includes(wImage.value)) wImage.value = fulls[0] ?? NONE_LABEL;
-          seen.file = wImage.value;
-          refreshFileUI();
-          refreshPreview();
-        } catch (err) {
-          if (myToken !== token) return;
-          wImage.options.values = [`${ERROR_LABEL}: ${err.message}`];
-          wImage.value = wImage.options.values[0];
-          seen.file = wImage.value;
-          refreshFileUI();
-          refreshPreview();
-        }
-        node.setDirtyCanvas(true, true);
-      };
-
-      const scheduleRefresh = () => {
-        clearTimeout(timer);
-        timer = setTimeout(() => refresh(), POLL_MS);
-      };
-
-      const onFolderChanged = () => scheduleRefresh();
-
-      // ---- 列式浏览面板(与 Load Video 同款交互, 进入子目录即更新 folder) ----
       let panel = null;
       let strip = null;
       let outsideHandler = null;
@@ -341,7 +403,9 @@ app.registerExtension({
           item.title = full;
           if (full === wImage.value) item.classList.add("selected");
           item.onclick = () => {
-            pickFile(full, cell);
+            wImage.value = full;
+            seen.file = full;
+            applyPicked();
             closePanel();
           };
           col.appendChild(item);
@@ -356,10 +420,7 @@ app.registerExtension({
       };
 
       const openPanel = () => {
-        if (panel) {
-          closePanel();
-          return;
-        }
+        if (panel) { closePanel(); return; }
         const root = currentRoot(wFolder);
         if (!root) return;
         panel = document.createElement("div");
@@ -375,10 +436,8 @@ app.registerExtension({
         panel.appendChild(closeBtn);
         document.body.appendChild(panel);
         const rect = btn.getBoundingClientRect();
-        const left = Math.max(8, Math.min(rect.left, window.innerWidth - 560));
-        const top = Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 330));
-        panel.style.left = `${left}px`;
-        panel.style.top = `${top}px`;
+        panel.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 560))}px`;
+        panel.style.top = `${Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 330))}px`;
         appendColumn(root, null);
         outsideHandler = (e) => {
           if (panel && !panel.contains(e.target) && !btn.contains(e.target)) closePanel();
@@ -396,56 +455,85 @@ app.registerExtension({
         nodeType.prototype.onRemoved?.apply(node, arguments);
       };
 
-      // 右键菜单: 对齐核心 LoadImage 的 Open Image / Save Image
-      nodeType.prototype.getExtraMenuOptions = function (_, options) {
-        const file = typeof wImage.value === "string" && wImage.value && !wImage.value.startsWith("(")
-          ? wImage.value : "";
-        if (file) {
-          const url = `/mervyn/media?path=${encodeURIComponent(file)}`;
-          options.unshift(
-            {
-              content: "Open Image",
-              callback: () => window.open(url, "_blank"),
-            },
-            {
-              content: "Save Image",
-              callback: () => {
-                const a = document.createElement("a");
-                a.href = url;
-                a.download = file.split(/[\\/]/).pop() || "image.png";
-                a.click();
-              },
-            },
-            null, // 分隔线
-          );
+      const refresh = async () => {
+        const myToken = ++token;
+        const root = currentRoot(wFolder);
+        if (!root) {
+          files = [];
+          refreshFileUI();
+          node.setDirtyCanvas(true, true);
+          return;
         }
-        return options;
+        try {
+          const data = await listMedia(root);
+          if (myToken !== token) return;
+          files = data.images.map((n) => joinPath(root, n));
+          // keep previously picked absolute paths selectable
+          wImage.options.values = [
+            ...new Set([...files, ...wImage.options.values.filter(
+              (v) => typeof v === "string" && v && !v.startsWith("(")
+            )]),
+          ];
+          if (files.length && !files.includes(wImage.value)) {
+            wImage.value = files[0];
+          }
+          seen.file = wImage.value;
+          refreshFileUI();
+        } catch (err) {
+          if (myToken !== token) return;
+          files = [];
+          refreshFileUI();
+        }
+        node.setDirtyCanvas(true, true);
       };
 
-      // 事件路径 1: widget callback(部分前端版本支持)
-      wFolder.callback = () => onFolderChanged();
+      const scheduleRefresh = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => refresh(), POLL_MS);
+      };
 
-      // 事件路径 2: onDrawBackground 轮询兜底
+      const onFolderChanged = () => scheduleRefresh();
+
+      // Event path 1: widget callback (only when still a widget)
+      if (wFolder) wFolder.callback = () => onFolderChanged();
+
+      // Event path 2: draw-time polling (linked values never touch widget.value)
       node.onDrawBackground = function () {
-        if (wFolder.value !== seen.folder) {
+        // 每帧重设 imgs: 前端预览刷新会清掉非输出节点的 node.imgs,
+        // 不重设的话核心 "Open in Mask Editor" 点击时守卫失败静默返回
+        setNodeImg();
+        if (wFolder && wFolder.value !== seen.folder) {
           seen.folder = wFolder.value;
           onFolderChanged();
         }
-        if (wImage.value !== seen.file) {
+        if (wImage && wImage.value !== seen.file) {
           seen.file = wImage.value;
           refreshFileUI();
-          refreshPreview();
         }
       };
 
-      // 工作流加载后恢复(mervyn_src 随工作流载入, 重指向映射)
-      node.onConfigure = function () {
-        nodeType.prototype.onConfigure?.apply(this, arguments);
-        Object.assign(srcMap, node.properties.mervyn_src || {});
-        refreshFileUI();
-        wSize.value = node._mervyn_size || "";
-        refreshPreview();
-        if (currentRoot(wFolder)) refresh();
+      // 实例级右键菜单(旧画布菜单路径): 前端会给原型统一挂 getExtraMenuOptions
+      // 并覆盖任何原型注入, 实例属性优先级更高且不被覆盖
+      node.getExtraMenuOptions = function (_, options) {
+        const file = typeof wImage?.value === "string" && wImage.value && !wImage.value.startsWith("(")
+          ? wImage.value : "";
+        if (!file) return options;
+        const url = `/mervyn/media?path=${encodeURIComponent(file)}`;
+        options.unshift(
+          { content: "Open Image", callback: () => window.open(url, "_blank") },
+          { content: "Copy Image", callback: () => copyImageToClipboard(url) },
+          {
+            content: "Save Image",
+            callback: () => {
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = file.split(/[\\/]/).pop() || "image.png";
+              a.click();
+            },
+          },
+          null,
+        );
+        return options;
       };
 
       refreshFileUI();
@@ -455,4 +543,3 @@ app.registerExtension({
     };
   },
 });
-

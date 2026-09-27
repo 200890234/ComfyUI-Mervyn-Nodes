@@ -60,6 +60,20 @@ spec_li = importlib.util.spec_from_file_location(
 mod_li = importlib.util.module_from_spec(spec_li)
 spec_li.loader.exec_module(mod_li)
 
+spec_sv = importlib.util.spec_from_file_location(
+    "my_save_video_to_folder",
+    os.path.join(REPO, "nodes", "my_save_video_to_folder.py"),
+)
+mod_sv = importlib.util.module_from_spec(spec_sv)
+spec_sv.loader.exec_module(mod_sv)
+
+spec_me = importlib.util.spec_from_file_location(
+    "my_mask_editor",
+    os.path.join(REPO, "nodes", "my_mask_editor.py"),
+)
+mod_me = importlib.util.module_from_spec(spec_me)
+spec_me.loader.exec_module(mod_me)
+
 # 1. INPUT_TYPES 结构: 所有输入均为 optional(可连接), required 为空
 types = mod.MyLoadVideoUnderPath.INPUT_TYPES()
 # 1.5 输出端口结构: 含 AUDIO 与 IMAGE 帧输出
@@ -407,45 +421,185 @@ with tempfile.TemporaryDirectory() as broot:
     except ValueError:
         pass
 
-# 12. MyLoadImageUnderPath: image 必选 + mask 输出
+# 12. MyLoadImageUnderPath: 核心 LoadImage 机制 + 任意路径(只输出 IMAGE + file_path)
 li = mod_li.MyLoadImageUnderPath()
 li_types = li.INPUT_TYPES()
-assert "image" in li_types["required"] and li_types["required"]["image"][1].get("image_upload") is True
+assert "image" in li_types["required"]
 assert set(li_types["optional"]) == {"folder"}
-assert li.RETURN_TYPES == ("STRING", "IMAGE", "MASK"), li.RETURN_TYPES
+assert li.RETURN_TYPES == ("IMAGE", "STRING"), li.RETURN_TYPES
+assert li.RETURN_NAMES == ("IMAGE", "file_path"), li.RETURN_NAMES
 with tempfile.TemporaryDirectory() as iroot:
     p1 = os.path.join(iroot, "a.png")
-    Image.new("RGB", (10, 4), (0, 255, 0)).save(p1)  # 无 alpha -> mask 全零
+    Image.new("RGB", (10, 4), (0, 255, 0)).save(p1)  # 无 alpha -> 不再有 MASK 输出
     p2 = os.path.join(iroot, "b_rgba.png")
-    Image.new("RGBA", (8, 8), (0, 0, 255, 128)).save(p2)  # alpha=0.5 -> mask=0.5
+    Image.new("RGBA", (8, 8), (0, 0, 255, 128)).save(p2)
     open(os.path.join(iroot, "b.txt"), "w").close()
 
-    fp, img, mask = li.run("", p1)
+    img, fpath = li.load_image(p1)  # 绝对路径
     assert img.shape == (1, 4, 10, 3), tuple(img.shape)
-    assert abs(float(img[0, 0, 0, 1]) - 1.0) < 1e-6  # 绿色通道
-    assert mask.shape == (1, 4, 10) and float(mask.max()) == 0.0, (tuple(mask.shape), mask.max())
-    assert os.path.normcase(fp) == os.path.normcase(os.path.normpath(p1))
+    assert abs(float(img[0, 0, 0, 1]) - 1.0) < 1e-6
+    assert os.path.normcase(fpath) == os.path.normcase(os.path.normpath(p1)), fpath
 
-    fp2, img2, mask2 = li.run(p2, "")
-    assert tuple(mask2.shape) == (1, 8, 8), tuple(mask2.shape)
-    assert abs(float(mask2[0, 0, 0]) - 0.5) < 0.01, float(mask2[0, 0, 0])  # 1 - 128/255
+    # 不产出 MASK: 即使存在同名伴生蒙版, 返回值个数也不变(蒙版唯一来源是 My Mask Editor)
+    Image.new("L", (10, 4), 255).save(os.path.join(iroot, "a_mask.png"))
+    out = li.load_image(p1)
+    assert len(out) == 2, len(out)
+    assert out[0].shape == (1, 4, 10, 3), tuple(out[0].shape)
+    os.remove(os.path.join(iroot, "a_mask.png"))
 
-    # folder 直填完整路径
-    fp3, img3, mask3 = li.run(p1, "")
-    assert img3.shape == (1, 4, 10, 3), tuple(img3.shape)
-
-    # 未选择且 folder 为空 -> 报错
-    try:
-        li.run("", "")
-        raise AssertionError("empty should raise")
-    except ValueError:
-        pass
+    img2, fpath2 = li.load_image(p2)
+    assert img2.shape == (1, 8, 8, 3), tuple(img2.shape)
+    assert os.path.normcase(fpath2) == os.path.normcase(os.path.normpath(p2)), fpath2
 
     # 非图片扩展名 -> 报错
     try:
-        li.run("", os.path.join(iroot, "b.txt"))
+        li.load_image(os.path.join(iroot, "b.txt"))
         raise AssertionError("txt should raise")
+    except Exception:
+        pass
+
+# 12.5 MyMaskEditor: 伴生蒙版文件约定(白=选中)
+me = mod_me.MyMaskEditor()
+me_types = me.INPUT_TYPES()
+assert set(me_types["required"]) == {"file_path"}, me_types["required"]
+assert me.RETURN_TYPES == ("MASK", "STRING"), me.RETURN_TYPES
+with tempfile.TemporaryDirectory() as mroot:
+    p1 = os.path.join(mroot, "a.png")
+    Image.new("RGB", (10, 4), (0, 255, 0)).save(p1)
+    import base64 as b64mod
+    from io import BytesIO
+
+    # 无蒙版文件: mask 全零, mask_path 空串
+    out = me.run(p1)  # OUTPUT_NODE: 返回 {"ui":…, "result":…}
+    mask, mpath = out["result"]
+    assert mask.shape == (1, 4, 10), tuple(mask.shape)
+    assert float(mask.max()) == 0.0 and mpath == "", (mpath, mask.max())
+
+    # 保存蒙版(dataURL) -> 伴生文件生成 -> mask 输出为涂的内容
+    mimg = Image.new("L", (10, 4), 255)  # 全白 = 全选
+    buf = BytesIO()
+    mimg.save(buf, format="PNG")
+    data_url = "data:image/png;base64," + b64mod.b64encode(buf.getvalue()).decode()
+    saved = mod_me.save_mask_file(p1, data_url)
+    assert saved == mod_me.mask_path_for(p1) and os.path.isfile(saved), saved
+
+    mask2, mpath2 = me.run(p1)["result"]
+    assert mpath2 == saved, mpath2
+    assert abs(float(mask2[0, 2, 5]) - 1.0) < 1e-6, float(mask2[0, 2, 5])  # 白=1
+
+    # 蒙版尺寸与图片不一致: 最近邻对齐到图片尺寸
+    m2 = Image.new("L", (5, 2), 200)
+    buf2 = BytesIO()
+    m2.save(buf2, format="PNG")
+    mod_me.save_mask_file(p1, "data:image/png;base64," + b64mod.b64encode(buf2.getvalue()).decode())
+    mask3, _ = me.run(p1)["result"]
+    assert mask3.shape == (1, 4, 10), tuple(mask3.shape)
+    assert abs(float(mask3[0, 0, 0]) - 200 / 255) < 0.01, float(mask3[0, 0, 0])
+
+    # 非法 dataURL 报错
+    try:
+        mod_me.save_mask_file(p1, "not-a-dataurl")
+        raise AssertionError("invalid dataURL should raise")
     except ValueError:
         pass
+
+# 13. MySaveVideoToFolder: 参数结构 + 真实视频保存(端到端)
+sv = mod_sv.MySaveVideoToFolder()
+sv_types = sv.INPUT_TYPES()
+assert set(sv_types["required"]) == {"video", "folder_path", "filename_prefix"}, sv_types["required"]
+assert set(sv_types["optional"]) == {"format", "codec", "crf", "preview"}, sv_types["optional"]
+assert sv.RETURN_NAMES == ("video", "saved_path"), sv.RETURN_NAMES
+assert sv.OUTPUT_NODE is True
+
+# 出队前校验: folder_path 为空/纯空格/引号包裹空串都要拦下
+for bad in ("", "   ", '""'):
+    r = sv.VALIDATE_INPUTS(bad)
+    assert r is not True and "folder" in str(r), r
+assert sv.VALIDATE_INPUTS("D:/videos/out") is True
+
+# 辅助函数: 变量展开 / 计数器 / 目录解析
+assert mod_sv._expand_vars("v_%year%", 0, 0).startswith("v_20"), mod_sv._expand_vars("v_%year%")
+assert mod_sv._expand_vars("no_vars") == "no_vars"
+with tempfile.TemporaryDirectory() as svdir:
+    # 计数器: 空目录 -> 1; 已有 00001/00002 -> 3
+    assert mod_sv._next_counter(svdir, "clip") == 1
+    for n in ("clip_00001_.mp4", "clip_00002_.mp4", "other_00009_.mp4"):
+        open(os.path.join(svdir, n), "w").close()
+    assert mod_sv._next_counter(svdir, "clip") == 3, mod_sv._next_counter(svdir, "clip")
+
+    # 目录自动创建(含多级)
+    deep = os.path.join(svdir, "a", "b")
+    resolved = mod_sv._resolve_folder(deep)
+    assert os.path.isdir(resolved), resolved
+    # 引号包裹的路径也能用
+    assert mod_sv._resolve_folder(f'"{deep}"') == resolved
+    # 空路径报错
+    try:
+        mod_sv._resolve_folder("   ")
+        raise AssertionError("empty folder_path should raise")
+    except ValueError:
+        pass
+
+    # 端到端: 用 imageio-ffmpeg 造视频 -> 经 My Load Video 读出 VIDEO -> Save Video 落盘
+    try:
+        import imageio_ffmpeg
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        src = os.path.join(svdir, "src.mp4")
+        subprocess.run(
+            [ffmpeg, "-y", "-loglevel", "error",
+             "-f", "lavfi", "-i", "testsrc=duration=0.5:size=64x48:rate=8",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", src],
+            check=True,
+        )
+        video, *_ = node.load_video("", src, False, 0.0, 0.0)
+        out_dir = os.path.join(svdir, "out")
+        res = sv.save(video, out_dir, "saved_%width%x%height%", "auto", "auto", -1)
+        saved_path = res["result"][1]
+        assert os.path.isfile(saved_path), saved_path
+        assert os.path.basename(saved_path).startswith("saved_64x48_00001_"), saved_path
+        assert saved_path.endswith(".mp4"), saved_path
+        assert res["result"][0] is video  # VIDEO 原样透传
+        assert res["ui"]["mervyn_save_video"][0] == saved_path
+        # 再存一次: 计数器递增到 00002, 不覆盖
+        res2 = sv.save(video, out_dir, "saved_%width%x%height%", "auto", "auto", -1)
+        assert os.path.basename(res2["result"][1]).startswith("saved_64x48_00002_"), res2["result"][1]
+        assert os.path.isfile(saved_path)  # 原文件仍在
+    except ImportError:
+        pass
+
+# 14. 结构性防呆: 所有节点的 INPUT_TYPES 输入名必须都能被执行方法接收
+# (历史上三次崩溃都源于"加了输入忘了改签名", 这里统一拦住)
+import inspect
+
+for mod, cls_name in (
+    (mod, "MyLoadVideoUnderPath"),
+    (mod_li, "MyLoadImageUnderPath"),
+    (mod_save, "MySaveImage"),
+    (mod_move, "MyMoveFile"),
+    (mod_code, "MyPythonCode"),
+    (mod_mb, "MyMediaBrowser"),
+    (mod_sv, "MySaveVideoToFolder"),
+    (mod_me, "MyMaskEditor"),
+):
+    cls = getattr(mod, cls_name, None)
+    if cls is None:
+        continue
+    types = cls.INPUT_TYPES()
+    names = set(types.get("required") or {}) | set(types.get("optional") or {})
+    fn_name = getattr(cls, "FUNCTION", None)
+    assert fn_name, f"{cls_name}: missing FUNCTION"
+    fn = getattr(cls, fn_name, None)
+    assert callable(fn), f"{cls_name}.{fn_name} not callable"
+    sig = inspect.signature(fn)
+    accepts_kwargs = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    if accepts_kwargs:
+        continue
+    missing = names - set(sig.parameters)
+    assert not missing, (
+        f"{cls_name}.{fn_name}() 缺少输入参数 {sorted(missing)} "
+        f"(INPUT_TYPES 声明了但方法签名没有, 执行时会 TypeError)"
+    )
 
 print("smoke test OK")

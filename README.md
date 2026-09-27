@@ -18,9 +18,10 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 | 节点 | 说明 |
 |------|------|
 | `My Load Video Under Path` | 浏览任意目录（可逐层进入子目录）并加载选中的视频文件，支持节点内预览 |
-| `My Load Image Under Path` | 任意目录选图（三段式选择器 + 列式浏览面板 + 内嵌预览），输出 IMAGE/MASK，支持 Open/Save Image 与 MaskEditor |
+| `My Load Image Under Path` | 任意目录选图（三段式选择器 + 列式浏览面板 + 内嵌预览 + 尺寸回显），输出 IMAGE + file_path，右键 Open/Save Image |
 | `My Media Browser` | 节点内联网格浏览任意目录的图片/视频/子目录（视频自动播放 + 面包屑 + 分页 + 收藏目录），选中即输出 IMAGE/VIDEO |
 | `My Save Image` | 把 IMAGE 保存到任意目录，支持重名跳过/覆盖，节点上直接显示保存结果 |
+| `My Save Video to Folder` | 把 VIDEO 保存到任意目录（ComfyUI 自带 writer，兼容则流复制），文件名计数器永不覆盖 |
 | `My Move File` | 把一个或多个文件移动到任意目录，支持重名跳过/覆盖，节点上直接显示移动结果 |
 | `My Python Code` | 执行一段自定义 Python 代码，变换数字/字符串输入并输出结果 |
 | `My Example Node` | 示例节点（占位，可删） |
@@ -36,10 +37,21 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 
 ## My Load Image Under Path
 
-- `folder`：任意图片目录；三段式选择器（◀ 文件名 ▶）——左右箭头同目录切换，中间点击弹列式浏览面板（进入子目录即更新 folder）
-- 选中即内嵌预览；`image` 输入声明与核心 LoadImage 一致（`image_upload`），右键菜单含 **Open Image / Save Image / Open in MaskEditor**
-- **MaskEditor 桥接**：从自定义目录选中图片时，自动上传副本到 `input/mervyn/` 并把 `image` 值切到该副本——蒙版编辑、保存、加载走核心标准流程；`image` 值也兼容 `文件名 [temp]` 注解
-- 输出：`file_path`（解析后的实际文件路径）+ `image`（1,H,W,3，EXIF 方向修正）+ `mask`（1-alpha，无 alpha 时全零；经 MaskEditor 编辑后即为涂的蒙版）
+- `folder`：任意图片目录；三段式选择器（◀ 文件名 ▶）——左右箭头同目录循环切换，中间点击弹列式浏览面板（进入子目录即更新 folder）
+- 选中即内嵌预览（高度按图片宽高比自适应，`size` 只读框显示原始宽高）；无需执行即可看到
+- 输出：`image`（1,H,W,3，EXIF 方向修正）+ `file_path`（选中文件的绝对路径，接给 `My Mask Editor`）
+- 设计说明：选中即用绝对路径，不做 input 目录桥接上传（任意目录场景）；因此不含核心 MaskEditor 菜单。**本节点不输出 MASK**——蒙版的唯一事实源是 `My Mask Editor`（接本节点的 `file_path` 涂蒙版，输出 mask），避免同一份 `<同名>_mask.png` 出现两个输出端造成歧义
+
+## My Save Video to Folder
+
+行为对齐社区同类节点（ChrisColeTech/ComfyUI-Get-Random-File 的 Save Video to Folder）：
+
+- `video`：接收 VIDEO（如 `My Load Video Under Path` 的输出）
+- `folder_path`：任意绝对目录，不存在自动创建（去首尾引号，支持 `~`）
+- `filename_prefix`：支持 `%width% %height% %year% %month% %day% %hour% %minute% %second%` 变量；自动追加 stock 风格计数器 `_00001_`，**永不覆盖**已有文件
+- `format` / `codec` / `crf`（可选）：走 ComfyUI 自带 writer——**格式兼容时直接流复制**（快、无损），仅当格式/编码器/指定 crf 需要时才重新编码；`crf = -1` 交给 ComfyUI 决定，设为 0-51 会强制重编码
+- 输出：`video`（原样透传，便于串接后续节点）+ `saved_path`（保存后的完整路径）
+- 节点上直接展示保存路径与摘要（分辨率 / 体积），执行后即见
 
 ## My Save Image / My Move File
 
