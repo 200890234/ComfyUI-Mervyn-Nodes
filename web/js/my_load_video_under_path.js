@@ -74,7 +74,10 @@ app.registerExtension({
       const wFile = node.widgets.find((w) => w.name === "video_file");
       const wPreview = node.widgets.find((w) => w.name === "preview");
       // video_file 原生下拉由三段式选择器替代, 塌缩隐藏(仍在 widgets 数组中序列化)
-      if (wFile) wFile.computeSize = () => [0, -4];
+      if (wFile) {
+        wFile.computeSize = () => [0, -4];
+        wFile.draw = () => {}; // 禁用画布文字绘制, 避免与相邻控件重叠
+      }
 
       // 内嵌视频预览
       const videoEl = document.createElement("video");
