@@ -332,8 +332,11 @@ with tempfile.TemporaryDirectory() as sdir:
     r4 = node_save.save(img[:1], sub, "deep", False)
     assert os.path.isfile(os.path.join(sub, "deep.png")), r4
 
-# 10. MyMoveFile: 单个/批量移动、重名跳过、覆盖
+# 10. MyMoveFile: 单个/批量移动、重名跳过、覆盖 + VHS Filenames 输入
 node_move = mod_move.MyMoveFile()
+_move_types = node_move.INPUT_TYPES()
+assert set(_move_types["required"]) == {"file_paths", "directory", "overwrite"}, _move_types
+assert set(_move_types["optional"]) == {"filenames"}, _move_types
 with tempfile.TemporaryDirectory() as mdir_src, tempfile.TemporaryDirectory() as mdir_dst:
     def _mk(name, content="x"):
         p = os.path.join(mdir_src, name)
@@ -363,6 +366,22 @@ with tempfile.TemporaryDirectory() as mdir_src, tempfile.TemporaryDirectory() as
     # 不存在的文件: error 不中断
     r4 = node_move.move([os.path.join(mdir_src, "ghost.txt")], mdir_dst, True)
     assert "error (not found)" in r4["result"][0], r4
+
+    # VHS_FILENAMES 规范形态 (save_output, [paths])
+    c, d = _mk("c.txt"), _mk("d.txt")
+    r5 = node_move.move("", mdir_dst, False, filenames=(True, [c, d]))
+    assert r5["result"][0].count("moved:") == 2, r5
+    assert os.path.isfile(os.path.join(mdir_dst, "c.txt"))
+
+    # 批量嵌套形态 + 与 file_paths 去重(同一路径只移动一次)
+    e = _mk("e.txt")
+    r6 = node_move.move(e, mdir_dst, False, filenames=[(False, [e]), (True, [e])])
+    assert r6["result"][0].count("moved:") == 1, r6
+    assert "error" not in r6["result"][0], r6
+
+    # 非路径标量(bool/空列表)被忽略, 不产生假路径
+    r7 = node_move.move("", mdir_dst, False, filenames=(False, []))
+    assert "no files to move" in r7["result"][0], r7
 
     # 空目录参数报错
     try:
