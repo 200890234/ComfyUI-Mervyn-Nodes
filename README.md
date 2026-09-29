@@ -1,124 +1,129 @@
 # ComfyUI-Mervyn-Nodes
 
-Mervyn 的 ComfyUI 自定义节点包。
+**English** | [中文](README.zh-CN.md)
 
-## 安装
+Mervyn's collection of ComfyUI custom nodes.
 
-手动 clone 到 ComfyUI 的节点目录：
+## Installation
+
+Clone it into ComfyUI's custom nodes directory:
 
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 ```
 
-发布到 Comfy Registry 后，也可直接在 ComfyUI Manager 中搜索 `ComfyUI-Mervyn-Nodes` 安装。
+Once it is published to the Comfy Registry you can also install it by searching for `ComfyUI-Mervyn-Nodes` in ComfyUI Manager.
 
-## 节点列表
+## Node list
 
-| 节点 | 说明 |
-|------|------|
-| `My Load Video Under Path` | 浏览任意目录（可逐层进入子目录）并加载选中的视频文件，支持节点内预览 |
-| `My Load Image Under Path` | 任意目录选图（三段式选择器 + 列式浏览面板 + 内嵌预览 + 尺寸回显），输出 IMAGE + file_path，右键 Open/Save Image |
-| `My Mask Editor` | 任意目录图片上涂蒙版（画/擦/粗细/软度/撤销/Fill/Invert/Clear），蒙版存为图片旁 `<同名>_mask.png`，输出 MASK |
-| `My Media Browser` | 节点内联网格浏览任意目录的图片/视频/子目录（视频自动播放 + 面包屑 + 分页 + 收藏目录），选中即输出 IMAGE/VIDEO |
-| `My Save Image` | 把 IMAGE 保存到任意目录，支持重名跳过/覆盖，节点上直接显示保存结果 |
-| `My Save Video to Folder` | 把 VIDEO 保存到任意目录（ComfyUI 自带 writer，兼容则流复制），文件名计数器永不覆盖 |
-| `My Move File` | 把一个或多个文件移动到任意目录，支持重名跳过/覆盖，节点上直接显示移动结果 |
-| `My Python Code` | 执行一段自定义 Python 代码，变换数字/字符串输入并输出结果 |
-| `My Example Node` | 示例节点（占位，可删） |
+| Node | Description |
+|------|-------------|
+| `My Load Video Under Path` | Browse any directory (navigating into subfolders) and load the selected video, with an in-node preview |
+| `My Load Image Under Path` | Pick an image from any directory (three-part selector + column browse panel + inline preview + size readout). Outputs IMAGE + file_path; right-click Open/Save Image |
+| `My Mask Editor` | Paint a mask on an image in any directory (paint/erase/size/softness/undo/Fill/Invert/Clear). The mask is saved next to the image as `<name>_mask.png`. Outputs MASK |
+| `My Media Browser` | In-node grid browser for images/videos/subfolders in any directory (autoplaying video tiles + breadcrumbs + paging + favourite folders). Selecting outputs IMAGE/VIDEO |
+| `My Save Image` | Save an IMAGE to any directory, skipping or overwriting on name clashes. The result is shown on the node |
+| `My Save Video to Folder` | Save a VIDEO to any directory (ComfyUI's own writer, stream-copies when compatible). The filename counter never overwrites |
+| `My Move File` | Move one or more files to any directory, skipping or overwriting on name clashes. The result is shown on the node. Also accepts VHS "Video Combine" Filenames output directly |
+| `My Python Code` | Run a custom Python snippet that transforms numeric/string inputs and returns results |
+| `My Example Node` | Example node (placeholder, safe to delete) |
 
 ## My Media Browser
 
-- `folder`：任意根目录，填入后节点内直接展开网格（无需弹窗）
-- 网格：图片缩略图 + 视频自动静音循环播放小窗（comfyui-browser 同款体验），面包屑（`›` 分隔）逐级进入子目录（只列当前层，进入即更新 folder 值），游标分页（初始 20 项 + Load more）
-- 收藏：收藏栏可把 folder 加入 favorites（localStorage 全局保存，跨工作流共享），点击收藏快速切换，✕ 移除
-- 点击图片/视频 → 选中（格子高亮）+ 灯箱大预览（视频可拖进度条，Range 流式；✕ / 点空白 / Esc 关闭）
-- 输出：`selected_file`（完整路径）+ `image`（选中图片时的 IMAGE，否则 None）+ `video`（选中视频时的 VIDEO，否则 None）
-- `selected_file` 输入可连接，也支持 `folder` 直填完整媒体路径（跳过浏览直接加载）
+- `folder`: any root directory. Once filled in, the grid expands inside the node (no popup needed)
+- Grid: image thumbnails + autoplaying muted looping video tiles (the comfyui-browser experience). Breadcrumbs (`›` separated) step into subfolders level by level (only the current level is listed; entering updates `folder`). Cursor paging (20 items initially + Load more)
+- Favourites: add a folder to favourites from the favourites bar (stored globally in localStorage, shared across workflows); click a favourite to switch instantly, ✕ to remove
+- Click an image/video → selected (tile highlighted) + lightbox preview (videos have a seek bar, streamed via Range; close with ✕ / click outside / Esc)
+- Outputs: `selected_file` (full path) + `image` (IMAGE when an image is selected, otherwise None) + `video` (VIDEO when a video is selected, otherwise None)
+- The `selected_file` input can be connected; `folder` also accepts a full media path to skip browsing and load directly
 
 ## My Load Image Under Path
 
-- `folder`：任意图片目录；三段式选择器（◀ 文件名 ▶）——左右箭头同目录循环切换，中间点击弹列式浏览面板（进入子目录即更新 folder）
-- 选中即内嵌预览（高度按图片宽高比自适应，`size` 只读框显示原始宽高）；无需执行即可看到
-- 输出：`image`（1,H,W,3，EXIF 方向修正）+ `file_path`（选中文件的绝对路径，接给 `My Mask Editor`）
-- 设计说明：选中即用绝对路径，不做 input 目录桥接上传（任意目录场景）。**本节点不输出 MASK**——蒙版的唯一事实源是 `My Mask Editor`（接本节点的 `file_path` 涂蒙版，输出 `mask`），避免同一份 `<同名>_mask.png` 出现两个输出端造成歧义
-- 因走绝对路径，本节点**不含**核心的 `Open in Mask Editor` 菜单（该功能依赖 input 目录，原因见下方 `My Mask Editor` 小节的限制说明）
+- `folder`: any image directory; three-part selector (◀ filename ▶) — the arrows cycle within the same directory, clicking the middle opens the column browse panel (entering a subfolder updates `folder`)
+- Selecting previews the image inline (height follows the image aspect ratio; the read-only `size` field shows the original width/height) — visible without running the workflow
+- Outputs: `image` (1,H,W,3, EXIF orientation applied) + `file_path` (absolute path of the selected file; feed it into `My Mask Editor`)
+- Design note: selection uses an absolute path and does no input-directory bridging upload (the any-directory premise). **This node does not output MASK** — the single source of truth for masks is `My Mask Editor` (connect this node's `file_path`, paint, and take its `mask` output), which avoids the same `<name>_mask.png` being exposed by two outputs
+- Because it uses absolute paths, this node does **not** offer the core `Open in Mask Editor` menu item (that feature depends on the input directory — see the limitation note in the `My Mask Editor` section below)
 
 ## My Mask Editor
 
-- `file_path`：要涂蒙版的图片（接 `My Load Image Under Path` 的 `file_path` 输出，或直接填绝对路径）
-- 节点内画布：画笔/橡皮、粗细、不透明度、软度、Undo/Redo、Fill、Invert、Clear
-- 保存：每次笔触后自动保存（防抖 800ms），写成图片同目录的 `<同名>_mask.png`（白=选中、黑=排除）
-- 输出：`mask`（1,H,W，1=选中区；未涂过则全零）+ `mask_path`（实际使用的蒙版文件，无则空）
-- 与 `My Load Image Under Path` 配合：Load Image 取 `file_path` → 本节点涂蒙版 → 输出 `mask`（两节点分工：加载归加载、蒙版归蒙版）
-- **设计说明（限制）**：核心的 MaskEditor 弹窗（右键 `Open in Mask Editor`）**无法用于任意目录**——加载走 `/view`（拒绝绝对路径与非 input 子目录），保存走 `/upload/mask`（强制写回 `input/clipspace/`）。因此本包的蒙版能力**只能是一个独立节点**：无法内嵌进 `My Load Image Under Path`，也无法像 Pixaroma 那样复用核心弹窗（那些做法的前提是图片必须位于 ComfyUI 的 input 目录内）
+- `file_path`: the image to paint on (connect `My Load Image Under Path`'s `file_path` output, or type an absolute path)
+- In-node canvas: brush/eraser, size, opacity, softness, Undo/Redo, Fill, Invert, Clear
+- Saving: auto-saved after each stroke (800 ms debounce) to `<name>_mask.png` next to the image (white = selected, black = excluded)
+- Outputs: `mask` (1,H,W, 1 = selected area; all zeros when nothing has been painted) + `mask_path` (the mask file actually in use; empty when none exists)
+- Used with `My Load Image Under Path`: Load Image supplies `file_path` → paint here → take the `mask` output (loading is loading, masking is masking)
+- **Design note (limitation)**: the core MaskEditor popup (right-click `Open in Mask Editor`) **cannot work with arbitrary directories** — loading goes through `/view` (rejects absolute paths and subfolders outside `input`) and saving goes through `/upload/mask` (forced back into `input/clipspace/`). Mask editing in this pack therefore **has to be a standalone node**: it cannot be embedded into `My Load Image Under Path`, and it cannot reuse the core popup the way Pixaroma does (that approach requires the image to live inside ComfyUI's input directory)
 
 ## My Save Video to Folder
 
-行为对齐社区同类节点（ChrisColeTech/ComfyUI-Get-Random-File 的 Save Video to Folder）：
+Behaviour matches similar community nodes (the Save Video to Folder in ChrisColeTech/ComfyUI-Get-Random-File):
 
-- `video`：接收 VIDEO（如 `My Load Video Under Path` 的输出）
-- `folder_path`：任意绝对目录，不存在自动创建（去首尾引号，支持 `~`）
-- `filename_prefix`：支持 `%width% %height% %year% %month% %day% %hour% %minute% %second%` 变量；自动追加 stock 风格计数器 `_00001_`，**永不覆盖**已有文件
-- `format` / `codec` / `crf`（可选）：走 ComfyUI 自带 writer——**格式兼容时直接流复制**（快、无损），仅当格式/编码器/指定 crf 需要时才重新编码；`crf = -1` 交给 ComfyUI 决定，设为 0-51 会强制重编码
-- 输出：`video`（原样透传，便于串接后续节点）+ `saved_path`（保存后的完整路径）
-- 节点上直接展示保存路径与摘要（分辨率 / 体积），执行后即见
+- `video`: accepts a VIDEO (e.g. the output of `My Load Video Under Path`)
+- `folder_path`: any absolute directory, created if missing (surrounding quotes stripped, `~` supported)
+- `filename_prefix`: supports `%width% %height% %year% %month% %day% %hour% %minute% %second%`; a stock-style counter `_00001_` is appended and existing files are **never overwritten**
+- `format` / `codec` / `crf` (optional): uses ComfyUI's own writer — **stream-copied when the format is compatible** (fast and lossless), re-encoded only when the format/codec/crf requires it; `crf = -1` lets ComfyUI decide, 0-51 forces a re-encode
+- Outputs: `video` (passed through unchanged, handy for chaining) + `saved_path` (full path of the saved file)
+- The saved path and a summary (resolution / size) are shown on the node right after execution
 
 ## My Save Image / My Move File
 
-两个节点的公共行为：
-- `directory`：任意绝对路径（不局限于 output），不存在自动创建
-- `overwrite`：默认 False；False 时目标重名则跳过该文件（不写入/不移动），True 时覆盖
-- `status` / `moved_path` 输出：逐文件的 `saved/moved: <路径>` 或 `skipped (already exists): <路径>`；`moved_path` 为实际写入的完整路径（跳过时不含）
-- 两个值同时渲染在节点上（执行后立即更新，随工作流保存），无需接预览节点即可看到结果
+Shared behaviour:
 
-`My Save Image`：输入 IMAGE，单张存 `前缀.png`，批量存 `前缀_00001.png` 起递增。
-`My Move File`：输入文件路径——`file_paths` 支持多行文本（每行一个路径）或上游传入的路径列表；不存在/为空的路径会在 status 中标记 `error` 并跳过，不中断整批。
+- `directory`: any absolute path (not limited to `output`); created if missing
+- `overwrite`: defaults to False; when False, a name clash skips that file (nothing is written/moved); True overwrites
+- `status` / `moved_path` outputs: per-file `saved/moved: <path>` or `skipped (already exists): <path>`; `moved_path` holds the full paths actually written (skipped files are not included)
+- Both values are rendered on the node (updated right after execution, saved with the workflow), so no preview node is needed
+
+`My Save Image`: takes an IMAGE; a single image is saved as `prefix.png`, batches increment from `prefix_00001.png`.
+
+`My Move File`: takes file paths — `file_paths` accepts multi-line text (one path per line) or a list of paths from upstream; missing/empty paths are marked `error` in `status` and skipped without aborting the batch.
+
+Optional `filenames` input (type `VHS_FILENAMES`): connect VHS "Video Combine"'s Filenames output and its rendered files are moved together with `file_paths` (duplicate paths are de-duplicated). This replaces `JDCN_VHSFileMover` — you can find it by searching "move file" instead of remembering that name. When VHS is not installed the socket simply stays empty and the other inputs are unaffected.
 
 ## My Python Code
 
-- 输入：`string_value` / `int_value` / `float_value` / `boolean_value` / `any1` / `any2`（均为可选输入端口）
-- 输出：`string` / `int` / `float` / `boolean` / `any`
-- 在 `python_code` 里直接用上面的变量名访问输入；给 `result_string` / `result_int` / `result_float` / `result_boolean` / `result_any` 赋值即产生对应输出（未赋值输出 None）
-- 内置函数采用白名单（len/str/int/float/range/sorted/sum 等），禁用 import/global；数据流内使用足够，不是防对抗沙箱
+- Inputs: `string_value` / `int_value` / `float_value` / `boolean_value` / `any1` / `any2` (all optional input ports)
+- Outputs: `string` / `int` / `float` / `boolean` / `any`
+- Inside `python_code` the variables above are available directly; assign to `result_string` / `result_int` / `result_float` / `result_boolean` / `result_any` to produce the corresponding output (unassigned outputs are None)
+- Built-ins are whitelisted (len/str/int/float/range/sorted/sum, ...) and `import`/`global` are disabled; enough for data-flow use, not an adversarial sandbox
 
 ## My Load Video Under Path
 
-- `path`：根目录路径（如 `D:/videos`），输入后自动刷新；也可直接填完整视频文件路径（跳过浏览直接加载）
-- `Browse`：列式浏览面板，子目录逐级向右展开（Finder 风格）；每层列出该层的子目录与视频，点击视频即选中；`..` 返回上一级，点击面板外或按 Esc 关闭
-- `video_file`：选中的视频文件（完整路径）；所有输入（path / video_file / preview / start_time / duration）均可转换为输入端口由上游驱动
-- `start_time` / `duration`：截取区间（秒），0 表示从头开始 / 播放到结尾
-- `skip_first_frames` / `frame_load_cap`：跳过前 N 帧 / 最多加载 N 帧（0 = 不限制）
-- `select_every_nth`：每 N 帧取 1 帧抽稀（0 = 保留全部）；有效帧率变为 force_rate/N，输出时长不变
-- `force_rate`：重采样到指定帧率（慢放补帧、快放丢帧），0 = 原生
-- `custom_width` / `custom_height`：加载时缩放，只填一边则保持比例
-- 帧控制参数全部默认时保持惰性加载（不解码）；任一启用时按窗口收窄后有界解码，输出的 VIDEO 同步反映重采样/缩放结果
-- `preview`：开关，打开后在节点上内嵌播放选中的视频
+- `path`: root directory path (e.g. `D:/videos`); refreshes automatically once entered. A full video file path is also accepted (skips browsing and loads directly)
+- `Browse`: column browse panel where subfolders expand to the right level by level (Finder style); each level lists its subfolders and videos, and clicking a video selects it; `..` goes up one level, clicking outside or pressing Esc closes the panel
+- `video_file`: the selected video file (full path); every input (path / video_file / preview / start_time / duration) can be converted into an input port driven by upstream nodes
+- `start_time` / `duration`: trim range in seconds; 0 means from the start / until the end
+- `skip_first_frames` / `frame_load_cap`: skip the first N frames / load at most N frames (0 = no limit)
+- `select_every_nth`: keep 1 frame out of every N (0 = keep all); the effective frame rate becomes force_rate/N and the output duration is unchanged
+- `force_rate`: resample to the given frame rate (duplicating/dropping frames as needed), 0 = native
+- `custom_width` / `custom_height`: resize on load; setting only one side keeps the aspect ratio
+- When every frame-control parameter is at its default the node stays lazy (no decoding); enabling any of them narrows the window and decodes within a bound, and the output VIDEO reflects the resampled/resized result
+- `preview`: toggle; when on, the selected video plays inline on the node
 
-**输出**
+**Outputs**
 
-| 端口 | 类型 | 说明 |
-|------|------|------|
-| `video` | VIDEO | 视频对象（含音轨）；需要单独的帧序列/音频时接核心 `GetVideoComponents` 节点 |
-| `file_path` | STRING | 选中视频的完整路径 |
-| `audio` | AUDIO | 音频轨（浮点波形，可在音频类节点间传递）；文件无音轨时为空 |
-| `video_frames` | IMAGE | 解码后的视频帧批次（N,H,W,3），可直接接图像类节点；使用帧控制参数时与 VIDEO 输出内容一致 |
-| `frame_count` | INT | 总帧数 |
-| `fps` | FLOAT | 帧率 |
-| `width` | INT | 宽（像素） |
-| `height` | INT | 高（像素） |
-| `duration` | FLOAT | 时长（秒，按截取区间修正） |
-- 输出：`video`（VIDEO 类型，可接入视频处理节点）、`file_path`（完整路径字符串）
+| Port | Type | Description |
+|------|------|-------------|
+| `video` | VIDEO | Video object (with audio track); use the core `GetVideoComponents` node when you need separate frames/audio |
+| `file_path` | STRING | Full path of the selected video |
+| `audio` | AUDIO | Audio track (float waveform, passable between audio nodes); empty when the file has no audio |
+| `video_frames` | IMAGE | Decoded frame batch (N,H,W,3), connectable to image nodes; matches the VIDEO output when frame-control parameters are used |
+| `frame_count` | INT | Total frame count |
+| `fps` | FLOAT | Frame rate |
+| `width` | INT | Width in pixels |
+| `height` | INT | Height in pixels |
+| `duration` | FLOAT | Duration in seconds (adjusted for the trim range) |
 
-> 注意：目录浏览与视频预览 API 会读取本机任意路径，仅供本地 ComfyUI 使用，请勿在暴露公网的实例上启用。
+> Note: the directory-browsing and video-preview APIs read arbitrary paths on this machine. They are intended for local ComfyUI use only — do not enable them on an instance exposed to the public internet.
 
-## 开发
+## Development
 
-- `__init__.py` — 插件入口，维护 `NODE_CLASS_MAPPINGS` 与 `WEB_DIRECTORY`
-- `nodes/` — 节点实现，按功能拆分模块
-- `nodes/example.py` — 示例节点，可修改或删除
-- `web/js/` — 前端扩展（动态下拉、节点内预览等界面逻辑）
-- `tests/smoke_test.py` — 免启动冒烟测试：`conda run -n ComfyuiP python tests/smoke_test.py`
-- `pyproject.toml` — Comfy Registry 发布元数据
+- `__init__.py` — plugin entry point, maintains `NODE_CLASS_MAPPINGS` and `WEB_DIRECTORY`
+- `nodes/` — node implementations, split into modules by feature
+- `nodes/example.py` — example node, modify or delete it freely
+- `web/js/` — frontend extensions (dynamic dropdowns, in-node previews and other UI logic)
+- `tests/smoke_test.py` — smoke test that needs no running server: `conda run -n ComfyuiP python tests/smoke_test.py`
+- `pyproject.toml` — Comfy Registry publishing metadata
 
-节点开发文档：https://docs.comfy.org/essentials/custom-node-basics
+Node development docs: https://docs.comfy.org/essentials/custom-node-basics
