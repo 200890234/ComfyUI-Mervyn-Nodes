@@ -253,7 +253,9 @@ app.registerExtension({
         probe.src = src;
       };
       const imgEl = document.createElement("img");
-      imgEl.style.cssText = "width:100%;object-fit:contain;background:#000;border-radius:4px;display:none";
+      // max-height 必须与 computeSize 的 480 上限一致: 否则竖构图长图会按原比例自行撑高,
+      // 超出控件高度溢出去压住下方字段
+      imgEl.style.cssText = "width:100%;max-height:480px;object-fit:contain;background:#000;border-radius:4px;display:none";
       const previewWidget = node.addDOMWidget("image_preview", "image_preview", imgEl);
       previewWidget.serializeValue = () => "";
       previewWidget.computeSize = () => {
@@ -311,7 +313,8 @@ app.registerExtension({
             imgEl.dataset.path = src;
             imgEl.src = src;
           }
-          imgEl.style.display = "";
+          // display:block 消除 <img> 默认 inline 的行盒基线空隙(会溢出压住相邻控件)
+          imgEl.style.display = "block";
           updateSize(src);
         } else {
           imgEl.dataset.path = "";
