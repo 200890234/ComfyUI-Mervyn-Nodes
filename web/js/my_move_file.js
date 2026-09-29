@@ -1,5 +1,24 @@
 // My Move File - 在节点上直接展示后端回传的 status / moved_path。
 import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+
+// 新版 Vue 前端下 node.onExecuted 不一定会被调用(表现为控件始终为空),
+// 故用官方稳定的全局 executed 事件作为主通道, onExecuted 仅作兜底。
+function findNode(id) {
+  if (id == null) return null;
+  const direct = app.graph?.getNodeById?.(id);
+  if (direct) return direct;
+  return (app.graph?._nodes || []).find((n) => String(n.id) === String(id)) || null;
+}
+
+api.addEventListener("executed", ({ detail }) => {
+  const out = detail?.output;
+  if (!out || !out.mervyn_move_file) return;
+  const node = findNode(detail.display_node) || findNode(detail.node);
+  if (!node || (node.comfyClass ?? node.type) !== "MyMoveFile") return;
+  console.debug("[Mervyn] move file executed:", out.mervyn_move_file);
+  node._mervynApplyResult?.(out.mervyn_move_file);
+});
 
 app.registerExtension({
   name: "Mervyn.MyMoveFile",
@@ -22,18 +41,25 @@ app.registerExtension({
       wMoved.disabled = true;
       wMoved.serializeValue = () => node._mervyn_moved || "";
 
+      // 两条通道共用: ui 回传 { mervyn_move_file: [status, moved] }
+      node._mervynApplyResult = (vals) => {
+        if (!Array.isArray(vals) || vals.length < 2) return;
+        node._mervyn_status = String(vals[0] ?? "");
+        node._mervyn_moved = String(vals[1] ?? "");
+        wStatus.value = node._mervyn_status;
+        wMoved.value = node._mervyn_moved;
+        node.setDirtyCanvas(true, true);
+      };
+
+      // 兜底通道: 传统 onExecuted(旧前端上仍有效)
       node.onExecuted = function (message) {
         nodeType.prototype.onExecuted?.apply(node, arguments);
         if (message && message.mervyn_move_file) {
-          const [status, moved] = message.mervyn_move_file;
-          node._mervyn_status = String(status ?? "");
-          node._mervyn_moved = String(moved ?? "");
-          wStatus.value = node._mervyn_status;
-          wMoved.value = node._mervyn_moved;
-          node.setDirtyCanvas(true, true);
+          node._mervynApplyResult(message.mervyn_move_file);
         }
       };
 
+      // 工作流加载后恢复上次展示
       node.onConfigure = function () {
         nodeType.prototype.onConfigure?.apply(this, arguments);
         wStatus.value = node._mervyn_status || "";

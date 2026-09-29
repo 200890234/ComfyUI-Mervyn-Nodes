@@ -1,6 +1,25 @@
 // My Save Video to Folder - 节点展示保存结果(saved path + 摘要);
 // preview 开关打开时, 保存完成后内嵌播放刚保存的视频。
 import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+
+// 新版 Vue 前端下 node.onExecuted 不一定会被调用(表现为控件始终为空),
+// 故用官方稳定的全局 executed 事件作为主通道, onExecuted 仅作兜底。
+function findNode(id) {
+  if (id == null) return null;
+  const direct = app.graph?.getNodeById?.(id);
+  if (direct) return direct;
+  return (app.graph?._nodes || []).find((n) => String(n.id) === String(id)) || null;
+}
+
+api.addEventListener("executed", ({ detail }) => {
+  const out = detail?.output;
+  if (!out || !out.mervyn_save_video) return;
+  const node = findNode(detail.display_node) || findNode(detail.node);
+  if (!node || (node.comfyClass ?? node.type) !== "MySaveVideoToFolder") return;
+  console.debug("[Mervyn] save video executed:", out.mervyn_save_video);
+  node._mervynApplyResult?.(out.mervyn_save_video);
+});
 
 app.registerExtension({
   name: "Mervyn.MySaveVideoToFolder",
@@ -49,14 +68,18 @@ app.registerExtension({
             videoEl.dataset.path = saved;
             videoEl.src = src;
           }
-          videoEl.style.display = "";
+          // display:block 消除 <video> 默认 inline 的行盒基线空隙(会溢出压住相邻控件)
+          videoEl.style.display = "block";
         } else {
           videoEl.dataset.path = "";
           videoEl.style.display = "none";
           videoEl.pause();
           videoEl.removeAttribute("src");
         }
-        node.setSize([node.size[0], node.computeSize()[1]]);
+        // 同步算一次 + 下一帧复算, 保证展开预览后节点高度够
+        const fitNode = () => node.setSize([node.size[0], node.computeSize()[1]]);
+        fitNode();
+        requestAnimationFrame(fitNode);
         node.setDirtyCanvas(true, true);
       };
 
@@ -70,16 +93,22 @@ app.registerExtension({
         };
       }
 
+      // 两条通道共用: ui 回传 { mervyn_save_video: [saved_path, info] }
+      node._mervynApplyResult = (vals) => {
+        if (!Array.isArray(vals) || vals.length < 2) return;
+        node._mervyn_saved = String(vals[0] ?? "");
+        node._mervyn_info = String(vals[1] ?? "");
+        wPath.value = node._mervyn_saved;
+        wInfo.value = node._mervyn_info;
+        refreshPreview(); // 保存完成后按开关状态刷新预览
+        node.setDirtyCanvas(true, true);
+      };
+
+      // 兜底通道: 传统 onExecuted(旧前端上仍有效)
       node.onExecuted = function (message) {
         nodeType.prototype.onExecuted?.apply(node, arguments);
-        const vals = message && message.mervyn_save_video;
-        if (Array.isArray(vals) && vals.length >= 2) {
-          node._mervyn_saved = String(vals[0] ?? "");
-          node._mervyn_info = String(vals[1] ?? "");
-          wPath.value = node._mervyn_saved;
-          wInfo.value = node._mervyn_info;
-          refreshPreview(); // 保存完成后按开关状态刷新预览
-          node.setDirtyCanvas(true, true);
+        if (message && message.mervyn_save_video) {
+          node._mervynApplyResult(message.mervyn_save_video);
         }
       };
 
