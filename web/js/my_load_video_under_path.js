@@ -129,11 +129,12 @@ app.registerExtension({
       const pickWidget = node.addDOMWidget("pick", "pick", pickBox);
       pickWidget.serializeValue = () => "";
 
-      // 控件顺序: path, 三段选择器, 各帧参数, preview 开关, 视频预览区(最底)
+      // 控件顺序: path, 三段选择器, 各帧参数(含 select_every_nth), preview 开关, 视频预览区(最底)
+      // 注意: select_every_nth 必须列入, 否则会落到默认档(99)被排到节点最底部
       const order = [
         "path", "pick",
         "start_time", "duration", "skip_first_frames", "frame_load_cap",
-        "force_rate", "custom_width", "custom_height",
+        "select_every_nth", "force_rate", "custom_width", "custom_height",
         "preview", "video_preview",
       ];
       node.widgets.sort((a, b) => {
@@ -166,7 +167,9 @@ app.registerExtension({
             videoEl.dataset.path = file;
             videoEl.src = `/mervyn/video?path=${encodeURIComponent(file)}`;
           }
-          videoEl.style.display = "";
+          // display:block 而非 "" —— <video> 默认是 inline, 行盒会在 height 之外
+          // 再添一段基线空隙(约 4px), 导致画面溢出去盖住下一个控件(overlap)
+          videoEl.style.display = "block";
           videoEl.style.height = "240px";
         } else {
           videoEl.dataset.path = "";
@@ -175,8 +178,12 @@ app.registerExtension({
           videoEl.pause();
           videoEl.removeAttribute("src");
         }
-        // 开/关后都按当前控件重新计算节点高度(避免节点只增不减)
-        node.setSize([node.size[0], node.computeSize()[1]]);
+        // 开/关后都按当前控件重新计算节点高度(避免节点只增不减)。
+        // 先同步算一次让布局立即跟上, 再延后一帧按 <video> 的最终布局复算一次,
+        // 防止展开预览时节点高度算少而把画面裁掉/挤到控件上
+        const fitNode = () => node.setSize([node.size[0], node.computeSize()[1]]);
+        fitNode();
+        requestAnimationFrame(fitNode);
         node.setDirtyCanvas(true, true);
       };
 

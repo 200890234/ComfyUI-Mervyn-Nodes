@@ -245,12 +245,6 @@ class MyLoadVideoUnderPath:
                 "video_file": ([""], {
                     "tooltip": "Video file picked via the Browse panel (full path). Connectable to override.",
                 }),
-                "preview": ("BOOLEAN", {
-                    "default": False,
-                    "label_on": "on",
-                    "label_off": "off",
-                    "tooltip": "Show an inline video preview on the node",
-                }),
                 "start_time": ("FLOAT", {
                     "default": 0.0,
                     "min": 0.0,
@@ -292,6 +286,13 @@ class MyLoadVideoUnderPath:
                     "default": 0,
                     "min": 0,
                     "tooltip": "Resize height on load; 0 = native",
+                }),
+                # preview 置于最后: 前端也会按 JS 排序把开关放到节点最底部
+                "preview": ("BOOLEAN", {
+                    "default": False,
+                    "label_on": "on",
+                    "label_off": "off",
+                    "tooltip": "Show an inline video preview on the node",
                 }),
             },
         }
