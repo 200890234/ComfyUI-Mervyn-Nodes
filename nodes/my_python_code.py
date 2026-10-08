@@ -7,7 +7,20 @@
 """
 
 import ast
+import datetime as _datetime
 import textwrap
+
+
+def _now(fmt: str = "%Y%m%d_%H%M%S") -> str:
+    """当前本地时间的格式化字符串(默认 年月日_时分秒, 如 20261007_233437)。
+
+    沙箱禁用了 import, 所以时间必须由节点自带(不能用户自己 import time)。
+    """
+    try:
+        return _datetime.datetime.now().strftime(str(fmt))
+    except Exception:
+        return _datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
 
 # 用户代码里可直接使用的名称白名单(不暴露任意内置与 import)
 _SAFE_BUILTINS = {
@@ -19,6 +32,7 @@ _SAFE_BUILTINS = {
     "print": print, "range": range, "repr": repr, "reversed": reversed,
     "round": round, "set": set, "slice": slice, "sorted": sorted,
     "str": str, "sum": sum, "tuple": tuple, "zip": zip,
+    "now": _now,
     "True": True, "False": False, "None": None,
 }
 
@@ -48,7 +62,9 @@ class MyPythonCode:
                     "tooltip": (
                         "Python code. Read inputs via string_value/int_value/"
                         "float_value/boolean_value/any1/any2. Write results to "
-                        "result_string/result_int/result_float/result_boolean/result_any."
+                        "result_string/result_int/result_float/result_boolean/result_any. "
+                        "now() returns the current local time as a string "
+                        "(default %Y%m%d_%H%M%S, e.g. 20261007_233437)."
                     ),
                 }),
             },

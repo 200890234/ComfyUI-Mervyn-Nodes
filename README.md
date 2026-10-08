@@ -75,7 +75,7 @@ Shared behaviour:
 - `status` / `moved_path` outputs: per-file `saved/moved: <path>` or `skipped (already exists): <path>`; `moved_path` holds the full paths actually written (skipped files are not included)
 - Both values are rendered on the node (updated right after execution, saved with the workflow), so no preview node is needed
 
-`My Save Image`: takes an IMAGE; a single image is saved as `prefix.png`, batches increment from `prefix_00001.png`.
+`My Save Image`: takes an IMAGE; a single image is saved as `prefix.png`, batches increment from `prefix_00001.png`. `filename_prefix` also supports `%width% %height% %year% %month% %day% %hour% %minute% %second%` (aligned with `My Save Video to Folder`).
 
 `My Move File`: takes file paths — `file_paths` accepts multi-line text (one path per line) or a list of paths from upstream; missing/empty paths are marked `error` in `status` and skipped without aborting the batch.
 
@@ -87,6 +87,7 @@ Optional `filenames` input (type `VHS_FILENAMES`): connect VHS "Video Combine"'s
 - Outputs: `string` / `int` / `float` / `boolean` / `any`
 - Inside `python_code` the variables above are available directly; assign to `result_string` / `result_int` / `result_float` / `result_boolean` / `result_any` to produce the corresponding output (unassigned outputs are None)
 - Built-ins are whitelisted (len/str/int/float/range/sorted/sum, ...) and `import`/`global` are disabled; enough for data-flow use, not an adversarial sandbox
+- Since imports are blocked there is no time source in the sandbox, so the node provides `now()`: `now()` returns the current local time as `%Y%m%d_%H%M%S` (e.g. `20261007_233437`), and `now("%Y")` accepts any `strftime` format. Example: `result_string = "output_" + now()`
 
 ## My Load Video Under Path
 
@@ -99,7 +100,12 @@ Optional `filenames` input (type `VHS_FILENAMES`): connect VHS "Video Combine"'s
 - `force_rate`: resample to the given frame rate (duplicating/dropping frames as needed), 0 = native
 - `custom_width` / `custom_height`: resize on load; setting only one side keeps the aspect ratio
 - When every frame-control parameter is at its default the node stays lazy (no decoding); enabling any of them narrows the window and decodes within a bound, and the output VIDEO reflects the resampled/resized result
-- `preview`: toggle; when on, the selected video plays inline on the node
+- `preview`: toggle; when on, the node plays inline **only the segment the run actually consumes**
+  - The window is `start_time` / `duration` first, then narrowed by `skip_first_frames` / `frame_load_cap` / `select_every_nth` / `force_rate` (identical formula to execution); the preview plays exactly that range, looping
+  - Editing any of those parameters recomputes the range and replays from its start (250 ms debounce)
+  - A badge in the bottom-left corner shows the active range plus the resulting frame count / frame rate, so you can confirm the parameters took effect
+  - Implementation: `src` carries a media fragment `#t=start,end` so the engine bounds playback, with a frame-level watchdog as a fallback; changing only `#t=` on the same file does not re-download it
+  - `custom_width` / `custom_height` scaling and `select_every_nth` judder are not visible in the picture (the preview plays at source frame rate); if the fps probe fails it degrades to a plain time range
 
 **Outputs**
 
@@ -116,6 +122,14 @@ Optional `filenames` input (type `VHS_FILENAMES`): connect VHS "Video Combine"'s
 | `duration` | FLOAT | Duration in seconds (adjusted for the trim range) |
 
 > Note: the directory-browsing and video-preview APIs read arbitrary paths on this machine. They are intended for local ComfyUI use only — do not enable them on an instance exposed to the public internet.
+
+**Backend routes used by the frontend**
+
+| Route | Description |
+|-------|-------------|
+| `GET /mervyn/listdir?root=&rel=` | Lists the subfolders and video files of one directory level |
+| `GET /mervyn/video?path=` | Streams the video (Range supported; the frontend `#t=` fragment playback relies on it) |
+| `GET /mervyn/videoinfo?path=` | Header-only probe returning `fps` / `duration` / `width` / `height` / `frame_count_est` (milliseconds, cached by mtime+size for the most recent file); the frontend uses it to derive the exact trim window |
 
 ## Development
 

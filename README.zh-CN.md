@@ -74,7 +74,7 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 - `status` / `moved_path` 输出：逐文件的 `saved/moved: <路径>` 或 `skipped (already exists): <路径>`；`moved_path` 为实际写入的完整路径（跳过时不含）
 - 两个值同时渲染在节点上（执行后立即更新，随工作流保存），无需接预览节点即可看到结果
 
-`My Save Image`：输入 IMAGE，单张存 `前缀.png`，批量存 `前缀_00001.png` 起递增。
+`My Save Image`：输入 IMAGE，单张存 `前缀.png`，批量存 `前缀_00001.png` 起递增。`filename_prefix` 同样支持 `%width% %height% %year% %month% %day% %hour% %minute% %second%` 变量（与 `My Save Video to Folder` 对齐）。
 `My Move File`：输入文件路径——`file_paths` 支持多行文本（每行一个路径）或上游传入的路径列表；不存在/为空的路径会在 status 中标记 `error` 并跳过，不中断整批。
 
 可选输入 `filenames`（类型 `VHS_FILENAMES`）：直接接 VHS「Video Combine」的 Filenames 输出，其产出的视频会与 `file_paths` 一起移动（同一路径自动去重）。作用是替代 `JDCN_VHSFileMover`——按习惯搜 "move file" 就能找到，不必去记那个名字。未安装 VHS 时该插槽空置，不影响其他输入。
@@ -85,6 +85,7 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 - 输出：`string` / `int` / `float` / `boolean` / `any`
 - 在 `python_code` 里直接用上面的变量名访问输入；给 `result_string` / `result_int` / `result_float` / `result_boolean` / `result_any` 赋值即产生对应输出（未赋值输出 None）
 - 内置函数采用白名单（len/str/int/float/range/sorted/sum 等），禁用 import/global；数据流内使用足够，不是防对抗沙箱
+- 因为禁用了 import，沙箱里没有时间来源，所以节点自带 `now()`：`now()` 返回当前本地时间，格式 `%Y%m%d_%H%M%S`（如 `20261007_233437`）；`now("%Y")` 可传任意 `strftime` 格式。示例：`result_string = "output_" + now()`
 
 ## My Load Video Under Path
 
@@ -97,7 +98,12 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 - `force_rate`：重采样到指定帧率（慢放补帧、快放丢帧），0 = 原生
 - `custom_width` / `custom_height`：加载时缩放，只填一边则保持比例
 - 帧控制参数全部默认时保持惰性加载（不解码）；任一启用时按窗口收窄后有界解码，输出的 VIDEO 同步反映重采样/缩放结果
-- `preview`：开关，打开后在节点上内嵌播放选中的视频
+- `preview`：开关，打开后在节点上内嵌播放**执行时真正取用的那一段**
+  - 区间由 `start_time` / `duration` 先截取，再由 `skip_first_frames` / `frame_load_cap` / `select_every_nth` / `force_rate` 收窄（公式与执行期完全一致），预览只播放这一段并循环
+  - 改动上述任一参数会立即重算区间，并跳回区间起点重播（250ms 防抖）
+  - 视频左下角角标显示当前区间与按参数算出的输出帧数/帧率，便于确认参数是否生效
+  - 实现方式：`src` 用媒体片段 `#t=start,end` 交给内核限制播放范围，另加帧级看门狗兜底；同一文件只改 `#t=` 不会重新下载
+  - `custom_width` / `custom_height` 的缩放、以及 `select_every_nth` 的抖动不影响画面（预览按源帧率播放）；拿不到 fps（探测失败）时退化为纯时间区间
 
 **输出**
 
@@ -114,6 +120,14 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 | `duration` | FLOAT | 时长（秒，按截取区间修正） |
 
 > 注意：目录浏览与视频预览 API 会读取本机任意路径，仅供本地 ComfyUI 使用，请勿在暴露公网的实例上启用。
+
+**前端用到的后端路由**
+
+| 路由 | 说明 |
+|------|------|
+| `GET /mervyn/listdir?root=&rel=` | 列出某层目录的子目录与视频文件 |
+| `GET /mervyn/video?path=` | 流式返回视频（支持 Range，前端 `#t=` 片段播放依赖它） |
+| `GET /mervyn/videoinfo?path=` | 只读容器头返回 `fps` / `duration` / `width` / `height` / `frame_count_est`（毫秒级，按 mtime+size 缓存最近一个文件），前端据此算出与执行一致的截取窗口 |
 
 ## 开发
 

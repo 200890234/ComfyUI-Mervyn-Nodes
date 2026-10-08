@@ -194,6 +194,29 @@ with tempfile.TemporaryDirectory() as root2:
     _, path3, *_ = node.load_video(video_path, "", False, 0.0, 0.0)
     assert os.path.normcase(path3) == os.path.normcase(os.path.normpath(video_path)), path3
 
+    # 7.5 /mervyn/videoinfo 探测: 只读容器头(不解码), 前端据此算截取窗口
+    info = mod._probe_video(video_path)
+    assert info is not None, "probe returned None"
+    assert abs(info["fps"] - fps_num) < 0.01, info
+    assert 1.6 <= info["duration"] <= 2.4, info
+    assert (info["width"], info["height"]) == (w, h), info
+    assert info["frame_count_est"] >= 14, info
+    assert mod._probe_video(video_path) is info, "第二次探测没有命中缓存"
+    # 7.6 帧率校准: 元数据可信时用元数据; 元数据失真(VFR 文件常见)时改用实测值
+    measured = mod._measure_fps(video_path)
+    assert abs(measured - fps_num) < 0.5, measured
+    assert abs(mod._resolve_src_fps(video_path, fps_num) - fps_num) < 0.01
+    assert abs(mod._resolve_src_fps(video_path, 1000.0) - measured) < 0.01
+    assert mod._resolve_src_fps(video_path, 0) == measured
+    # 坏文件/非法后缀: 探测返回 None, 路径解析返回空串
+    broken = os.path.join(root2, "broken.mp4")
+    open(broken, "w").close()
+    assert mod._probe_video(broken) is None
+    assert mod._resolve_video_arg("") == ""
+    assert mod._resolve_video_arg(os.path.join(root2, "nope.mp4")) == ""
+    assert mod._resolve_video_arg("not_a_video.txt") == ""
+    assert mod._resolve_video_arg(video_path) == os.path.abspath(os.path.normpath(video_path))
+
     # 8. 帧控制参数(视频为 16 帧 @8fps, 64x48)
     # cap: 有界截取, video_frames 输出与帧数一致
     v_cap, _, a_cap, fr_cap, fc_cap, fps_cap, wd, ht, du_cap = node.load_video(
@@ -299,6 +322,13 @@ try:
 except RuntimeError:
     pass
 
+# 8.5 now() 时间助手: 沙箱禁用了 import, 时间只能由节点提供
+s_now = node_pc.run("result_string = 'output_' + now()", "", 0, 0.0, False, None, None)[0]
+assert s_now[:7] == "output_" and len(s_now) == 22, s_now          # output_YYYYMMDD_HHMMSS
+assert s_now[7:15].isdigit() and s_now[15] == "_" and s_now[16:22].isdigit(), s_now
+s_year = node_pc.run("result_string = now('%Y')", "", 0, 0.0, False, None, None)[0]
+assert len(s_year) == 4 and s_year.isdigit(), s_year
+
 # 9. MySaveImage: 保存/重名跳过/覆盖
 try:
     import torch as th
@@ -316,6 +346,16 @@ with tempfile.TemporaryDirectory() as sdir:
     moved_paths = r["result"][1].split("; ")
     assert len(moved_paths) == 2 and os.path.isfile(moved_paths[0]), moved_paths
     assert r["ui"]["mervyn_save_image"] == [r["result"][0], r["result"][1]]
+
+    # filename_prefix 支持 %year% 等变量(与 My Save Video to Folder 对齐)
+    import time as _tm
+    lt = _tm.localtime()
+    r_var = node_save.save(img[:1], sdir, "date_%year%%month%%day%", False)
+    expect_date = f"date_{lt.tm_year}{lt.tm_mon:02d}{lt.tm_mday:02d}.png"
+    assert os.path.basename(r_var["result"][1]) == expect_date, r_var["result"][1]
+    tiny = th.rand(1, 8, 5, 3)  # H=8, W=5 -> 验证 %width%/%height% 取自图像
+    r_wh = node_save.save(tiny, sdir, "wh_%width%x%height%", False)
+    assert os.path.basename(r_wh["result"][1]) == "wh_5x8.png", r_wh["result"][1]
 
     # 重名 + overwrite=False: 全部跳过, moved_path 为空
     r2 = node_save.save(img, sdir, "shot", False)

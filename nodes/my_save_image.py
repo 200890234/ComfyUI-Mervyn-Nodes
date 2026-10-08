@@ -1,10 +1,29 @@
 """My Save Image: 保存 IMAGE 到任意目录(不限于 output), 支持重名跳过/覆盖。"""
 
 import os
+import time
 
 import numpy as np
 import torch
 from PIL import Image
+
+
+def _expand_vars(text: str, width: int = 0, height: int = 0) -> str:
+    """stock 风格的前缀变量(与 My Save Video to Folder 对齐)。
+
+    支持 %width% %height% %year% %month% %day% %hour% %minute% %second%。
+    """
+    if "%" not in text:
+        return text
+    now = time.localtime()
+    for var, val in (
+        ("%width%", str(width)), ("%height%", str(height)),
+        ("%year%", str(now.tm_year)), ("%month%", f"{now.tm_mon:02d}"),
+        ("%day%", f"{now.tm_mday:02d}"), ("%hour%", f"{now.tm_hour:02d}"),
+        ("%minute%", f"{now.tm_min:02d}"), ("%second%", f"{now.tm_sec:02d}"),
+    ):
+        text = text.replace(var, val)
+    return text
 
 
 class MySaveImage:
@@ -14,7 +33,10 @@ class MySaveImage:
             "required": {
                 "images": ("IMAGE",),
                 "directory": ("STRING", {"default": ""}),
-                "filename_prefix": ("STRING", {"default": "MyImage"}),
+                "filename_prefix": ("STRING", {
+                    "default": "MyImage",
+                    "tooltip": "File prefix. Supports %width% %height% %year% %month% %day% %hour% %minute% %second%.",
+                }),
                 "overwrite": ("BOOLEAN", {"default": False}),
             },
         }
@@ -24,7 +46,10 @@ class MySaveImage:
     OUTPUT_NODE = True
     FUNCTION = "save"
     CATEGORY = "my"
-    DESCRIPTION = "Save images to any directory with overwrite/conflict handling."
+    DESCRIPTION = (
+        "Save images to any directory with overwrite/conflict handling. "
+        "filename_prefix supports %width% %height% %year% %month% %day% %hour% %minute% %second%."
+    )
 
     def save(self, images, directory, filename_prefix, overwrite):
         directory = (directory or "").strip().strip('"').strip("'")
@@ -34,6 +59,8 @@ class MySaveImage:
         os.makedirs(directory, exist_ok=True)
 
         prefix = (filename_prefix or "").strip() or "MyImage"
+        # %year% 等变量先展开(宽度/高度取自本批图像), 再清掉文件名非法字符
+        prefix = _expand_vars(prefix, int(images.shape[2]), int(images.shape[1]))
         for ch in '\\/:*?"<>|':
             prefix = prefix.replace(ch, "")
         prefix = prefix.strip() or "MyImage"
