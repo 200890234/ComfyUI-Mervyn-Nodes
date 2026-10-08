@@ -1,9 +1,11 @@
 """My Load Video Under Path: 浏览任意目录并加载选中的视频文件。
 
 后端职责:
-- 注册两个 API 路由供前端扩展调用:
-    GET /mervyn/listdir  列出某层目录的子目录与视频文件
-    GET /mervyn/video    流式返回视频文件(支持 Range, 供节点内预览播放)
+- 注册三个 API 路由供前端扩展调用:
+    GET /mervyn/listdir    列出某层目录的子目录与视频文件
+    GET /mervyn/video      流式返回视频文件(支持 Range, 供节点内预览播放)
+    GET /mervyn/videoinfo  返回 fps/时长/宽高等头部元数据(只读容器头, 不解码),
+                           供前端算出"与执行完全一致"的截取区间
 - 节点执行: 校验选中的视频路径, 返回 VIDEO 对象与完整路径字符串。
 
 目录导航在前端扩展 web/js/my_load_video_under_path.js 中实现为
@@ -11,6 +13,7 @@
 mervyn_rel, 随工作流一起保存/恢复。
 """
 
+import asyncio
 import mimetypes
 import os
 
@@ -141,6 +144,121 @@ def _extract_audio(path: str, start_time: float, duration: float):
     return audio
 
 
+def _resolve_video_arg(raw: str) -> str:
+    """把请求参数规范化为一个确实存在的视频文件路径; 不合法时返回空串。"""
+    raw = (raw or "").strip().strip('"').strip("'")
+    path = os.path.abspath(os.path.normpath(raw)) if raw else ""
+    if (
+        not path
+        or os.path.splitext(path)[1].lower() not in VIDEO_EXTS
+        or not os.path.isfile(path)
+    ):
+        return ""
+    return path
+
+
+# 实测帧率缓存: 与探测缓存同样按 (路径, mtime, 大小) 失效, 只保留少量条目
+_FPS_CACHE: dict[tuple[str, int, int], float] = {}
+_FPS_CACHE_MAX = 4
+
+
+def _measure_fps(path: str, probe_frames: int = 90) -> float:
+    """解码少量帧, 按 pts 跨度实测真实帧率; 失败返回 0。
+
+    容器的 average_rate 在 VFR(可变帧率)文件上经常失真 —— 从 GIF/动图转出的 webm
+    会报 1000fps, 也有报 30fps 而真实密度是 60fps 的。失真值会让
+    skip_first_frames 的秒数换算、重采样帧数、duration 全部成倍偏掉
+    (表现为输出片段时长对但内容是慢放), 所以这里用真实解码出的帧间距校准一次。
+    """
+    try:
+        import av
+    except ImportError:
+        return 0.0
+    try:
+        with av.open(path, mode="r") as container:
+            stream = container.streams.video[0]
+            tb = float(stream.time_base) if stream.time_base else 0.0
+            if tb <= 0:
+                return 0.0
+            pts: list[int] = []
+            for frame in container.decode(stream):
+                if frame.pts is not None:
+                    pts.append(frame.pts)
+                if len(pts) >= probe_frames:
+                    break
+    except Exception:
+        return 0.0
+    if len(pts) < 2:
+        return 0.0
+    span = (pts[-1] - pts[0]) * tb
+    return (len(pts) - 1) / span if span > 0 else 0.0
+
+
+def _resolve_src_fps(path: str, meta_fps: float) -> float:
+    """取可信的源帧率: 元数据与实测差异超过 5% 时采用实测值。"""
+    try:
+        stat = os.stat(path)
+        key = (os.path.normcase(path), int(stat.st_mtime), int(stat.st_size))
+    except OSError:
+        key = None
+    if key is not None and key in _FPS_CACHE:
+        measured = _FPS_CACHE[key]
+    else:
+        measured = _measure_fps(path)
+        if key is not None:
+            if len(_FPS_CACHE) >= _FPS_CACHE_MAX:
+                _FPS_CACHE.clear()
+            _FPS_CACHE[key] = measured
+    if measured <= 0:
+        return meta_fps if meta_fps > 0 else 30.0
+    if meta_fps <= 0:
+        return measured
+    if abs(meta_fps - measured) / max(meta_fps, measured) > 0.05:
+        return measured
+    return meta_fps
+
+
+# 探测结果缓存: 只保留最近一个文件, 避免参数微调时反复打开容器头
+_PROBE_CACHE: dict[tuple[str, int, int], dict] = {}
+
+
+def _probe_video(path: str) -> dict | None:
+    """只读容器头拿元数据, 失败返回 None。
+
+    fps/时长/宽高都来自 container 头部(毫秒级); 帧数不做真实统计
+    (某些容器会退化成全片扫描), 只给估算值。fps 会经 _measure_fps 校准 ——
+    VFR 文件的元数据帧率不可信, 前端要靠它算出与执行一致的截取窗口。
+    """
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    key = (os.path.normcase(path), int(stat.st_mtime), int(stat.st_size))
+    cached = _PROBE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        source = InputImpl.VideoFromFile(path)
+        meta_fps = float(source.get_frame_rate())
+        duration = float(source.get_duration())
+        width, height = source.get_dimensions()
+        fps = _resolve_src_fps(path, meta_fps)
+    except Exception:
+        return None
+    info = {
+        "path": path,
+        "fps": fps,
+        "duration": duration,
+        "width": int(width),
+        "height": int(height),
+        "frame_count_est": int(round(duration * fps)) if fps > 0 and duration > 0 else 0,
+        "mtime": int(stat.st_mtime),
+    }
+    _PROBE_CACHE.clear()
+    _PROBE_CACHE[key] = info
+    return info
+
+
 def _register_routes() -> None:
     try:
         from server import PromptServer
@@ -164,15 +282,24 @@ def _register_routes() -> None:
         data["rel"] = rel
         return web.json_response(data)
 
+    @routes.get("/mervyn/videoinfo")
+    async def videoinfo(request):
+        raw = request.query.get("path", "")
+        path = _resolve_video_arg(raw)
+        if not path:
+            return web.json_response({"error": f"invalid video file: {raw}"}, status=400)
+        # av.open 是阻塞调用, 放线程池里跑, 不占事件循环
+        loop = asyncio.get_running_loop()
+        info = await loop.run_in_executor(None, _probe_video, path)
+        if info is None:
+            return web.json_response({"error": f"cannot read video: {path}"}, status=422)
+        return web.json_response(info)
+
     @routes.get("/mervyn/video")
     async def video(request):
-        raw = (request.query.get("path") or "").strip().strip('"').strip("'")
-        path = os.path.abspath(os.path.normpath(raw)) if raw else ""
-        if (
-            not path
-            or os.path.splitext(path)[1].lower() not in VIDEO_EXTS
-            or not os.path.isfile(path)
-        ):
+        raw = request.query.get("path", "")
+        path = _resolve_video_arg(raw)
+        if not path:
             return web.json_response({"error": f"invalid video file: {raw}"}, status=400)
 
         size = os.path.getsize(path)
@@ -348,7 +475,9 @@ class MyLoadVideoUnderPath:
             )
 
         video = InputImpl.VideoFromFile(file_path, start_time=start, duration=length_eff)
-        src_fps = float(video.get_frame_rate())
+        # 容器的 average_rate 在 VFR 文件上会失真(报 1000fps, 或报 30 而真实 60),
+        # 而它决定 skip 的秒数换算、重采样帧数与 duration, 失真会让输出变成慢放
+        src_fps = _resolve_src_fps(file_path, float(video.get_frame_rate()))
 
         # 所有帧控制参数均为默认值 -> 保持惰性加载, 不解码
         if skip == 0 and cap == 0 and nth == 0 and rate_in == 0 and want_w == 0 and want_h == 0:
