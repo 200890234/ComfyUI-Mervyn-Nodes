@@ -26,7 +26,8 @@ Once it is published to the Comfy Registry you can also install it by searching 
 | `My Save Image` | Save an IMAGE to any directory, skipping or overwriting on name clashes. The result is shown on the node |
 | `My Save Video to Folder` | Save a VIDEO to any directory (ComfyUI's own writer, stream-copies when compatible). The filename counter never overwrites |
 | `My Move File` | Move one or more files to any directory, skipping or overwriting on name clashes. The result is shown on the node. Also accepts VHS "Video Combine" Filenames output directly |
-| `My Python Code` | Run a custom Python snippet that transforms numeric/string inputs and returns results |
+| `My Python Code` | Run a custom Python snippet (V1: fixed input slots) that transforms numeric/string inputs and returns results |
+| `My Python Code V2` | Same sandbox and outputs, but built on the V3 API with auto-growing input slots (`var_0`, `var_1`, ...) |
 | `My Example Node` | Example node (placeholder, safe to delete) |
 
 ## My Media Browser
@@ -81,13 +82,27 @@ Shared behaviour:
 
 Optional `filenames` input (type `VHS_FILENAMES`): connect VHS "Video Combine"'s Filenames output and its rendered files are moved together with `file_paths` (duplicate paths are de-duplicated). This replaces `JDCN_VHSFileMover` — you can find it by searching "move file" instead of remembering that name. When VHS is not installed the socket simply stays empty and the other inputs are unaffected.
 
-## My Python Code
+## My Python Code / My Python Code V2
 
-- Inputs: `string_value` / `int_value` / `float_value` / `boolean_value` / `any1` / `any2` (all optional input ports)
-- Outputs: `string` / `int` / `float` / `boolean` / `any`
-- Inside `python_code` the variables above are available directly; assign to `result_string` / `result_int` / `result_float` / `result_boolean` / `result_any` to produce the corresponding output (unassigned outputs are None)
-- Built-ins are whitelisted (len/str/int/float/range/sorted/sum, ...) and `import`/`global` are disabled; enough for data-flow use, not an adversarial sandbox
-- Since imports are blocked there is no time source in the sandbox, so the node provides `now()`: `now()` returns the current local time as `%Y%m%d_%H%M%S` (e.g. `20261007_233437`), and `now("%Y")` accepts any `strftime` format. Example: `result_string = "output_" + now()`
+Both nodes share the exact same sandbox and execution semantics (`nodes/my_python_code_core.py`), so a snippet behaves identically in either one. They differ only in the input slots:
+
+| | My Python Code (V1) | My Python Code V2 |
+|---|---|---|
+| Input slots | fixed: `string_value` / `int_value` / `float_value` / `boolean_value` / `any1` / `any2` | the same four named ones, plus **auto-growing** slots (up to 20) |
+| Slot variable names | `any1` / `any2` | `var_0`, `var_1`, ... in slot order (any type, so IMAGE/LATENT can be connected) |
+| API | classic | V3 (`io.ComfyNode` + `io.Autogrow`) |
+| Outputs | `string` / `int` / `float` / `boolean` / `any` | identical |
+
+They coexist: deleting either one does not affect the other (the shared code lives in its own module).
+
+- Inside `python_code` read the inputs by name; assign to `result_string` / `result_int` / `result_float` / `result_boolean` / `result_any` to fill the matching output. **Unassigned results fall back to a per-port zero value**: `""` / `0` / `0.0` / `False` (`any` stays `None`). Explicitly assigned values pass through untouched.
+- Built-ins are whitelisted (types, `len`/`sum`/`sorted`/`min`/`max`/`all`/`any`/`zip`/`enumerate`/`chr`/`ord`/`pow`/`hex`/`bin`/..., `getattr`/`isinstance`/`type`, ...). `import` / `global` / `nonlocal` are rejected.
+- These standard-library modules are **pre-bound** — use them directly, no import needed: `math`, `random`, `json`, `re`, `datetime`, `itertools`, `functools`, `string`. Example: `result_string = json.dumps({"n": math.floor(float_value)})`
+- `import` statements stay blocked. The only `__import__` present is a guarded one whose sole purpose is to let the standard library perform its internal lazy imports (`datetime.strftime` / `date.today` need `time`, `strptime` needs `_strptime`); `os` / `sys` / `subprocess` and friends are still refused.
+- `now()` is a convenience time source: `now()` returns the current local time as `%Y%m%d_%H%M%S` (e.g. `20261007_233437`) and `now("%Y")` accepts any `strftime` format. `datetime.datetime.now().strftime(...)` works as well.
+- Caching: when a snippet uses a non-deterministic entry point (`now()`, `random.*`, `datetime.now()`, ...) the node forces a re-run every time. Otherwise ComfyUI would cache the first value and every batch run would produce the same timestamp/random number. Snippets without those entry points stay cacheable.
+- Scope note: the sandbox guards against accidents, not adversarial code.
+- V2 output note: the core V3 API only offers Autogrow for **inputs** (there is no `Autogrow.Output`, and no `DynamicOutput` implementation), so V2 keeps the same five fixed outputs. Dynamic output slots would need a custom front-end widget — out of scope for now.
 
 ## My Load Video Under Path
 

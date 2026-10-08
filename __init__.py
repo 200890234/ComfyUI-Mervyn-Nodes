@@ -8,6 +8,7 @@ NODE_DISPLAY_NAME_MAPPINGS 是画布上显示的名称。
 from .nodes.example import ExampleNode
 from .nodes.my_load_video_under_path import MyLoadVideoUnderPath  # noqa: F401 (导入即注册 API 路由)
 from .nodes.my_python_code import MyPythonCode
+from .nodes.my_python_code_v2 import MyPythonCodeV2
 from .nodes.my_save_image import MySaveImage
 from .nodes.my_move_file import MyMoveFile
 from .nodes.my_media_browser import MyMediaBrowser
@@ -20,6 +21,7 @@ NODE_CLASS_MAPPINGS = {
     "MyExampleNode": ExampleNode,
     "MyLoadVideoUnderPath": MyLoadVideoUnderPath,
     "MyPythonCode": MyPythonCode,
+    "MyPythonCodeV2": MyPythonCodeV2,
     "MySaveImage": MySaveImage,
     "MyMoveFile": MyMoveFile,
     "MyMediaBrowser": MyMediaBrowser,
@@ -32,6 +34,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MyExampleNode": "My Example Node",
     "MyLoadVideoUnderPath": "My Load Video Under Path",
     "MyPythonCode": "My Python Code",
+    "MyPythonCodeV2": "My Python Code V2",
     "MySaveImage": "My Save Image",
     "MyMoveFile": "My Move File",
     "MyMediaBrowser": "My Media Browser",

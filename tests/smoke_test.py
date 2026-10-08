@@ -32,6 +32,13 @@ spec_code = importlib.util.spec_from_file_location(
 mod_code = importlib.util.module_from_spec(spec_code)
 spec_code.loader.exec_module(mod_code)
 
+spec_code_v2 = importlib.util.spec_from_file_location(
+    "my_python_code_v2",
+    os.path.join(REPO, "nodes", "my_python_code_v2.py"),
+)
+mod_code_v2 = importlib.util.module_from_spec(spec_code_v2)
+spec_code_v2.loader.exec_module(mod_code_v2)
+
 spec_save = importlib.util.spec_from_file_location(
     "my_save_image",
     os.path.join(REPO, "nodes", "my_save_image.py"),
@@ -289,9 +296,90 @@ out = node_pc.run(
 assert out[0] == "ABC" and out[1] == 6 and abs(out[2] - 2.0) < 1e-9, out
 assert out[3] is True and out[4] == [1, 2], out
 
-# 8.1 未赋值的结果变量输出 None
+# 8.1 未赋值的结果变量按端口类型输出零值(None 会原样传给下游并可能报错)
 out2 = node_pc.run("result_int = 7", "x", 1, 1.0, False, None, None)
-assert out2 == (None, 7, None, None, None), out2
+assert out2 == ("", 7, 0.0, False, None), out2
+assert isinstance(out2[0], str) and isinstance(out2[2], float) and out2[3] is False, out2
+
+# 8.1b 引用 now() 时必须强制失效缓存, 否则重复执行会拿到同一时间戳
+# IS_CHANGED 约定: 返回 NaN(浮点) 表示"永远重算", 否则返回代码本身当作缓存键
+import math as _math
+
+
+def _forces_recompute(code):
+    value = pc.IS_CHANGED(code)
+    return isinstance(value, float) and _math.isnan(value)
+
+
+assert _forces_recompute("result_string = now()"), "now() 应触发重算"
+assert not _forces_recompute("result_string = string_value"), "确定性代码应可缓存"
+assert not _forces_recompute("now = 5\nresult_int = now"), "自己赋值 now 不算非确定性"
+assert not _forces_recompute("result_string = 'now()'"), "字符串字面量里的 now 不算"
+assert not _forces_recompute("result_string = ") , "语法错不应让 IS_CHANGED 崩溃"
+assert _forces_recompute("result_int = random.randint(1, 9)"), "random 应触发重算"
+assert _forces_recompute("result_string = str(datetime.datetime.now())"), "datetime.now() 应触发重算"
+assert _forces_recompute("random.seed(1)\nresult_int = random.randint(1, 9)"), "random.seed 后仍重算(宁可多算)"
+assert not _forces_recompute("result_string = re.sub('a', 'b', string_value)"), "纯 re 代码应可缓存"
+
+# 8.1c 预绑定标准库模块可直接使用(无需 import)
+out_mod = node_pc.run(
+    "result_string = json.dumps({'floor': math.floor(float_value), 'n': len(string_value)})\n"
+    "result_int = sum(itertools.islice(itertools.count(1), 3))\n"  # 1+2+3
+    "result_float = math.sqrt(float_value)\n"
+    "result_boolean = any([False, int_value > 0]) and all([True, True])\n",
+    "a1b2", 3, 4.0, False, None, None,
+)
+assert '"floor": 4' in out_mod[0] and '"n": 4' in out_mod[0], out_mod[0]
+assert out_mod[1] == 6, out_mod[1]
+assert abs(out_mod[2] - 2.0) < 1e-9, out_mod[2]
+assert out_mod[3] is True, out_mod[3]
+
+# re / string / functools(含 lambda) 同样可用
+out_re = node_pc.run(
+    "result_string = re.sub(r'[0-9]', '#', string_value)\n"
+    "result_int = len(string.ascii_lowercase)\n"
+    "result_float = functools.reduce(lambda a, b: a + b, [0.5, 1.5])\n",
+    "a1b2", 0, 0.0, False, None, None,
+)
+assert out_re[0] == "a#b#", out_re[0]
+assert out_re[1] == 26 and abs(out_re[2] - 2.0) < 1e-9, out_re
+
+# datetime 模块可用, 且 now() 便捷函数仍等价
+out_dt = node_pc.run(
+    "result_string = datetime.datetime.now().strftime('%Y')\n"
+    "result_boolean = len(now()) > 0\n",
+    "", 0, 0.0, False, None, None,
+)
+assert out_dt[0].isdigit() and len(out_dt[0]) == 4, out_dt[0]
+assert out_dt[3] is True, out_dt  # result_boolean 在索引 3(result_int 未赋值 -> 0)
+
+# strftime/strptime/date.today 会触发标准库内部的延迟 import(实测需要 time 与
+# _strptime), 沙箱必须放行这些, 否则报 KeyError: '__import__'
+out_dt2 = node_pc.run(
+    "result_string = datetime.datetime.strptime('2026-01-02', '%Y-%m-%d').strftime('%Y/%m/%d')\n"
+    "result_int = datetime.date.today().year\n",
+    "", 0, 0.0, False, None, None,
+)
+assert out_dt2[0] == "2026/01/02", out_dt2[0]
+assert out_dt2[1] >= 2026, out_dt2[1]
+
+# 受控 __import__ 只放行白名单模块: os 仍被挡住
+try:
+    node_pc.run(
+        "result_any = __builtins__['__import__']('os')", "", 0, 0.0, False, None, None
+    )
+    raise AssertionError("os 应被 _guarded_import 拒绝")
+except RuntimeError as e:
+    assert "not allowed" in str(e), e
+
+# 新补齐的内置: chr/ord/hex/bin/pow
+out_b = node_pc.run(
+    "result_string = chr(ord('A') + 1) + hex(255) + bin(2)\n"
+    "result_int = pow(2, 5)\n",
+    "", 0, 0.0, False, None, None,
+)
+assert out_b[0] == "B0xff0b10", out_b[0]
+assert out_b[1] == 32, out_b[1]
 
 # 8.2 import 被拒绝
 for bad in ("import os", "from os import path", "global x"):
@@ -316,18 +404,77 @@ except RuntimeError:
 # 8.4 内置白名单可用、未知名称不可用
 out3 = node_pc.run("result_any = str(sorted([3, 1, 2]))", "", 0, 0.0, False, None, None)
 assert out3[4] == "[1, 2, 3]", out3
-try:
-    node_pc.run("result_any = __import__", "", 0, 0.0, False, None, None)
-    raise AssertionError("__import__ should not be available")
-except RuntimeError:
-    pass
+# __import__ 不再是"不可用", 而是被换成受控版本: 只放行白名单模块
+out3b = node_pc.run(
+    "result_boolean = __import__('time').time() > 0", "", 0, 0.0, False, None, None
+)
+assert out3b[3] is True, out3b
+for bad_mod in ("os", "sys", "subprocess", "shutil"):
+    try:
+        node_pc.run(f"result_any = __import__('{bad_mod}')", "", 0, 0.0, False, None, None)
+        raise AssertionError(f"__import__({bad_mod!r}) 应被 _guarded_import 拒绝")
+    except RuntimeError:
+        pass
 
-# 8.5 now() 时间助手: 沙箱禁用了 import, 时间只能由节点提供
+# 8.5 now() 时间助手: 等价于 datetime.datetime.now().strftime(...) 的便捷写法
 s_now = node_pc.run("result_string = 'output_' + now()", "", 0, 0.0, False, None, None)[0]
 assert s_now[:7] == "output_" and len(s_now) == 22, s_now          # output_YYYYMMDD_HHMMSS
 assert s_now[7:15].isdigit() and s_now[15] == "_" and s_now[16:22].isdigit(), s_now
 s_year = node_pc.run("result_string = now('%Y')", "", 0, 0.0, False, None, None)[0]
 assert len(s_year) == 4 and s_year.isdigit(), s_year
+
+# 8.6 MyPythonCodeV2: V3 API(io.ComfyNode) + Autogrow 动态输入槽
+v2 = mod_code_v2.MyPythonCodeV2
+v2_schema = v2.GET_SCHEMA()  # 触发 schema 校验: define_schema 写错会当场抛错
+assert v2_schema.node_id == "MyPythonCodeV2", v2_schema.node_id
+assert len(v2_schema.outputs) == 5, len(v2_schema.outputs)
+# 旧式执行器靠 FUNCTION 找到执行方法, V3 类由基类提供(classproperty)
+assert callable(getattr(v2, v2.FUNCTION, None)), v2.FUNCTION
+
+
+def _run_v2(code, **inputs):
+    """按 ComfyUI 的调用方式调用 V2 并取出结果元组。"""
+    inputs.setdefault("python_code", code)
+    return tuple(mod_code_v2.MyPythonCodeV2.execute(**inputs).args)
+
+
+# 具名输入 + 未赋值结果按端口类型给零值(与 V1 同一套语义)
+out_v2 = _run_v2("result_string = string_value.upper()\nresult_int = int_value * 2\n",
+                 string_value="ab", int_value=3)
+assert out_v2 == ("AB", 6, 0.0, False, None), out_v2
+
+# Autogrow 槽位按顺序变成 var_0/var_1/var_2(扁平 dict)
+out_v2b = _run_v2("result_string = f'{var_0}|{var_1}|{var_2}'\nresult_any = var_1\n",
+                  vars={"var_0": "a", "var_1": 7, "var_2": [1, 2]})
+assert out_v2b[0] == "a|7|[1, 2]", out_v2b[0]
+assert out_v2b[4] == 7, out_v2b[4]
+
+# 一个槽位都没连(vars 为 None / 空 dict)时不能崩
+assert _run_v2("result_int = 42", vars=None)[1] == 42
+assert _run_v2("result_int = 43", vars={})[1] == 43
+
+# 沙箱与 V1 共用: import 仍被拒, 预绑定模块 / 受控 __import__ 行为一致
+for bad in ("import os", "from os import path",
+            "result_any = __builtins__['__import__']('subprocess')"):
+    try:
+        _run_v2(bad)
+        raise AssertionError(f"should have rejected: {bad!r}")
+    except (ValueError, RuntimeError):
+        pass
+out_v2c = _run_v2("result_string = json.dumps({'n': math.floor(float_value)})",
+                  float_value=2.7)
+assert '"n": 2' in out_v2c[0], out_v2c[0]
+
+
+# V3 的缓存判定(fingerprint_inputs)与 V1 的 IS_CHANGED 对齐
+def _v2_forces_recompute(code):
+    value = mod_code_v2.MyPythonCodeV2.fingerprint_inputs(code)
+    return isinstance(value, float) and _math.isnan(value)
+
+
+assert _v2_forces_recompute("result_int = now()")
+assert _v2_forces_recompute("result_int = random.randint(1, 9)")
+assert not _v2_forces_recompute("result_int = 1 + 1")
 
 # 9. MySaveImage: 保存/重名跳过/覆盖
 try:
@@ -636,6 +783,7 @@ for mod, cls_name in (
     (mod_save, "MySaveImage"),
     (mod_move, "MyMoveFile"),
     (mod_code, "MyPythonCode"),
+    (mod_code_v2, "MyPythonCodeV2"),
     (mod_mb, "MyMediaBrowser"),
     (mod_sv, "MySaveVideoToFolder"),
     (mod_me, "MyMaskEditor"),

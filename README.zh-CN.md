@@ -26,7 +26,8 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 | `My Save Image` | 把 IMAGE 保存到任意目录，支持重名跳过/覆盖，节点上直接显示保存结果 |
 | `My Save Video to Folder` | 把 VIDEO 保存到任意目录（ComfyUI 自带 writer，兼容则流复制），文件名计数器永不覆盖 |
 | `My Move File` | 把一个或多个文件移动到任意目录，支持重名跳过/覆盖，节点上直接显示移动结果；可直接接 VHS「Video Combine」的 Filenames 输出 |
-| `My Python Code` | 执行一段自定义 Python 代码，变换数字/字符串输入并输出结果 |
+| `My Python Code` | 执行一段自定义 Python 代码（V1：固定输入槽），变换数字/字符串输入并输出结果 |
+| `My Python Code V2` | 同一套沙箱与输出，改用 V3 API + Autogrow，输入槽自动增长（`var_0`/`var_1`/…） |
 | `My Example Node` | 示例节点（占位，可删） |
 
 ## My Media Browser
@@ -79,13 +80,27 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 
 可选输入 `filenames`（类型 `VHS_FILENAMES`）：直接接 VHS「Video Combine」的 Filenames 输出，其产出的视频会与 `file_paths` 一起移动（同一路径自动去重）。作用是替代 `JDCN_VHSFileMover`——按习惯搜 "move file" 就能找到，不必去记那个名字。未安装 VHS 时该插槽空置，不影响其他输入。
 
-## My Python Code
+## My Python Code / My Python Code V2
 
-- 输入：`string_value` / `int_value` / `float_value` / `boolean_value` / `any1` / `any2`（均为可选输入端口）
-- 输出：`string` / `int` / `float` / `boolean` / `any`
-- 在 `python_code` 里直接用上面的变量名访问输入；给 `result_string` / `result_int` / `result_float` / `result_boolean` / `result_any` 赋值即产生对应输出（未赋值输出 None）
-- 内置函数采用白名单（len/str/int/float/range/sorted/sum 等），禁用 import/global；数据流内使用足够，不是防对抗沙箱
-- 因为禁用了 import，沙箱里没有时间来源，所以节点自带 `now()`：`now()` 返回当前本地时间，格式 `%Y%m%d_%H%M%S`（如 `20261007_233437`）；`now("%Y")` 可传任意 `strftime` 格式。示例：`result_string = "output_" + now()`
+两个节点共用完全相同的沙箱与执行语义（`nodes/my_python_code_core.py`），同一段代码在两边行为一致，差别只在输入槽：
+
+| | My Python Code（V1） | My Python Code V2 |
+|---|---|---|
+| 输入槽 | 固定：`string_value` / `int_value` / `float_value` / `boolean_value` / `any1` / `any2` | 同样 4 个具名输入 + **自动增长**的槽位（上限 20 个） |
+| 槽位变量名 | `any1` / `any2` | 按槽位顺序为 `var_0`、`var_1`、…（类型不限，可接 IMAGE/LATENT） |
+| 接口 | 经典写法 | V3（`io.ComfyNode` + `io.Autogrow`） |
+| 输出 | `string` / `int` / `float` / `boolean` / `any` | 完全相同 |
+
+两者可并行存在：删掉任一个都不影响另一个（共享代码在独立模块里）。
+
+- 在 `python_code` 里直接用变量名访问输入；给 `result_string` / `result_int` / `result_float` / `result_boolean` / `result_any` 赋值即产生对应输出。**未赋值的结果按端口类型给零值**：`""` / `0` / `0.0` / `False`（`any` 仍为 `None`）；显式赋值的原样透传。
+- 内置函数采用白名单（类型转换、`len`/`sum`/`sorted`/`min`/`max`/`all`/`any`/`zip`/`enumerate`/`chr`/`ord`/`pow`/`hex`/`bin`、`getattr`/`isinstance`/`type` 等）；静态拒绝 `import` / `global` / `nonlocal`。
+- 以下标准库已**预绑定**，直接用模块名即可，无需 import：`math`、`random`、`json`、`re`、`datetime`、`itertools`、`functools`、`string`。示例：`result_string = json.dumps({"n": math.floor(float_value)})`
+- `import` 语句仍然禁用。唯一存在的 `__import__` 是受控版本，只为放行标准库内部的延迟导入（`datetime.strftime`/`date.today` 需要 `time`，`strptime` 需要 `_strptime`）；`os` / `sys` / `subprocess` 等一律拒绝。
+- `now()` 是便捷的时间来源：`now()` 返回当前本地时间，格式 `%Y%m%d_%H%M%S`（如 `20261007_233437`）；`now("%Y")` 可传任意 `strftime` 格式。也可以用 `datetime.datetime.now().strftime(...)`。
+- 缓存：代码里一旦用到非确定性入口（`now()`、`random.*`、`datetime.now()` 等），节点会强制每次重算——否则 ComfyUI 会把第一次的值缓存住，批量出图会拿到同一时间戳/同一随机数。不含这些入口的代码保持可缓存。
+- 定位说明：沙箱只防意外，不防对抗。
+- V2 输出说明：核心 V3 API 的 Autogrow 只支持**输入**（没有 `Autogrow.Output`，也没有 `DynamicOutput` 实现类），所以 V2 输出仍是固定的 5 个。动态输出槽需要自写前端 widget，暂不涉及。
 
 ## My Load Video Under Path
 
