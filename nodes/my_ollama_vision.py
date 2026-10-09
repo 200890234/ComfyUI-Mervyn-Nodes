@@ -4,6 +4,10 @@
 按 max_frames 等间隔抽帧、等比缩小后 base64 编码, 通过 ``POST /api/generate``
 提交给本地 Ollama 视觉模型, 返回模型回答(默认提示词是"反推视频提示词")。
 
+输出: text(提示词) / info(调用摘要) / text_alt(第二语言版本, 仅 language=both 时有值)。
+language 可选 as written / english / chinese / both; 选 both 会让模型输出 EN:/ZH: 两行,
+节点再把它们拆到 text(英文)与 text_alt(中文)两个输出口。
+
 设计要点:
 - 只依赖 ComfyUI 核心自带的 requests, 不新增第三方依赖;
 - 视频可能有几百帧, 默认只抽 6 张、长边缩到 768, 避免一次提交几十张原图;
@@ -15,6 +19,7 @@
 
 import base64
 import io
+import re
 
 import numpy as np
 from PIL import Image
@@ -36,16 +41,112 @@ _DEFAULT_PROMPT = (
     "Describe, in this order: the main subject, what it is doing, the setting, the "
     "camera (shot size and movement), the lighting, the colour and mood, and the "
     "overall visual style.\n"
-    "Answer with a single plain paragraph in English, present tense, under 120 words. "
+    "Answer with a single plain paragraph, present tense, under 120 words. "
     "No preamble, no bullet points, no headings, no meta commentary — output only the "
     "prompt itself."
 )
 
 _PROMPT_TOOLTIP = (
-    "What to ask the vision model. The default reverse-engineers a video prompt "
-    "from the frames. To get the answer in another language, add a sentence such as "
-    "\"Answer in Chinese.\" to the prompt."
+    "What to ask the vision model. The default reverse-engineers a video prompt from "
+    "the frames. Write it in whatever language you like — 'Answer in Japanese.' works "
+    "too, or use the `language` option below to have it appended for you."
 )
+
+# 语言模式 -> 追加到"提示词末尾"的指令; "auto" 不追加, 完全按用户写的来。
+# 为什么必须追加到 prompt 末尾而不是 system: Ollama 的对话模板把 system 放在最前面,
+# 模型对最后出现的指令权重最高。实测(冲突场景: system 要求英文, 这里要求中文):
+# 追加到 prompt 末尾 3/3 生效; 追加到 system 末尾 0/3 生效, 即使措辞更硬也一样。
+_LANGUAGE_SUFFIX = {
+    "english": "\n\nAnswer in English only.",
+    "chinese": "\n\nAnswer in Chinese only.",
+    "both": (
+        "\n\nGive the answer twice, as exactly two lines and nothing else:\n"
+        "EN: <the prompt in English>\n"
+        "ZH: <the same prompt in Chinese>"
+    ),
+}
+
+_LANGUAGES = ("auto", "english", "chinese", "both")
+
+_LANGUAGE_TOOLTIP = (
+    "The single switch that decides the output language. 'auto' sends the prompt "
+    "untouched and leaves the language to your prompt / `system` text. 'english' or "
+    "'chinese' enforce that language by appending an instruction to the END of the "
+    "prompt — which is also why they override a conflicting `system`: measured on "
+    "qwen3.5, a prompt-tail instruction won 3/3 while the very same instruction "
+    "appended to `system` won 0/3. The answer is then language-checked, and retried "
+    "once with a firmer instruction if it came back in the wrong language. 'both' asks "
+    "for two labelled lines, split into the `text` (EN) and `text_alt` (ZH) outputs."
+)
+
+
+def apply_language(prompt: str, language: str) -> str:
+    """按 language 模式给提示词追加语言指令(纯函数, 便于测试)。"""
+    suffix = _LANGUAGE_SUFFIX.get(str(language or "").strip().lower())
+    return (prompt or "") + (suffix or "")
+
+
+def split_bilingual(text: str):
+    """把 'EN: ...' / 'ZH: ...' 的回答拆成 (英文, 中文)。
+
+    拆不开时返回 (原文, "") —— 宁可把整段原文交给下游, 也不丢内容。
+    """
+    body = (text or "").strip()
+    english = re.search(r"^[ \t]*(?:EN|ENGLISH)[ \t]*[:：][ \t]*", body,
+                        re.IGNORECASE | re.MULTILINE)
+    chinese = re.search(r"^[ \t]*(?:ZH|CN|CHINESE|中文)[ \t]*[:：][ \t]*", body,
+                        re.IGNORECASE | re.MULTILINE)
+    if not (english and chinese):
+        return body, ""
+    if english.start() < chinese.start():
+        en = body[english.end():chinese.start()]
+        zh = body[chinese.end():]
+    else:
+        zh = body[chinese.end():english.start()]
+        en = body[english.end():]
+    return en.strip(), zh.strip()
+
+
+# 语言自检: 汉字占非空白字符的比例超过它就算"中文文本"(用来决定要不要重试)
+_CJK_RATIO_MAX = 0.10
+
+# 自检没过时的重试指令(同样追加在提示词末尾 —— 位置最靠后, 模型权重最高)
+_LANGUAGE_RETRY = {
+    "english": ("\n\nYour previous answer was not in English. Answer again, "
+                "entirely in English."),
+    "chinese": ("\n\nYour previous answer was not in Chinese. Answer again, "
+                "entirely in Chinese (请全部用中文回答)。"),
+    "both": ("\n\nYour previous answer did not follow the two-line format. Answer "
+             "again with exactly two lines: 'EN: <English prompt>' then "
+             "'ZH: <Chinese prompt>'."),
+}
+
+
+def cjk_ratio(text: str) -> float:
+    """字符串里汉字占非空白字符的比例(语言自检用)。"""
+    body = "".join(str(text or "").split())
+    if not body:
+        return 0.0
+    cjk = sum(1 for ch in body if "\u4e00" <= ch <= "\u9fff")
+    return cjk / len(body)
+
+
+def language_ok(primary: str, alt: str, language: str) -> bool:
+    """输出是否符合所选语言; auto 永远算通过(语言由用户文本决定)。
+
+    这是粗检(只看汉字占比), 用途仅是决定"要不要追加指令重试一次",
+    不追求语义级判定 —— 少量汉字(如答案里引用了中文招牌)仍算通过。
+    """
+    mode = str(language or "").strip().lower()
+    if mode == "english":
+        return cjk_ratio(primary) <= _CJK_RATIO_MAX
+    if mode == "chinese":
+        return cjk_ratio(primary) > _CJK_RATIO_MAX
+    if mode == "both":
+        return (bool(str(primary or "").strip()) and bool(str(alt or "").strip())
+                and cjk_ratio(primary) <= _CJK_RATIO_MAX
+                and cjk_ratio(alt) > _CJK_RATIO_MAX)
+    return True
 
 
 def pick_frames(images, max_frames: int):
@@ -219,6 +320,10 @@ class MyOllamaVision:
                     "multiline": True,
                     "tooltip": _PROMPT_TOOLTIP,
                 }),
+                "language": (_LANGUAGES, {
+                    "default": "as written",
+                    "tooltip": _LANGUAGE_TOOLTIP,
+                }),
             },
             "optional": {
                 "ollama_url": ("STRING", {
@@ -273,11 +378,15 @@ class MyOllamaVision:
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("text", "info")
+    # text_alt 追加在最后: 不动已有输出口的序号, 避免旧工作流的连线错位
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("text", "info", "text_alt")
     OUTPUT_TOOLTIPS = (
-        "The model's answer (the reverse-engineered prompt by default).",
+        "The model's answer (the reverse-engineered prompt by default). With "
+        "language='both' this holds the English one.",
         "One-line summary: model, frames sent, token counts and elapsed time.",
+        "Only filled when language='both': the same prompt in the other language "
+        "(Chinese), so both versions can be used downstream separately.",
     )
     FUNCTION = "run"
     CATEGORY = "my"
@@ -292,7 +401,8 @@ class MyOllamaVision:
             return "prompt is empty — tell the vision model what to produce"
         return True
 
-    def run(self, images, model, prompt, ollama_url=DEFAULT_URL, max_frames=6,
+    def run(self, images, model, prompt, language="auto",
+            ollama_url=DEFAULT_URL, max_frames=6,
             max_side=768, system="", temperature=0.2, seed=0, num_predict=512,
             think=False, timeout=300):
         if images is None:
@@ -301,21 +411,44 @@ class MyOllamaVision:
         if not frames:
             raise ValueError("images is empty — nothing to send to Ollama")
 
+        mode = str(language or "").strip().lower()
+        wants_both = mode == "both"
         encoded = [encode_frame(frame, int(max_side)) for frame in frames]
         endpoint = build_endpoint(ollama_url)
-        payload = build_payload(
-            model, prompt, encoded, system=system, temperature=temperature,
-            seed=seed, num_predict=num_predict, think=think,
-        )
-        text, data = call_ollama(endpoint, payload, timeout)
+
+        def _ask(extra: str):
+            """请求一次; extra 是额外追加到提示词末尾的指令(重试时用)。"""
+            payload = build_payload(
+                model, apply_language(prompt, language) + (extra or ""), encoded,
+                system=system, temperature=temperature, seed=seed,
+                num_predict=num_predict, think=think,
+            )
+            answer, meta = call_ollama(endpoint, payload, timeout)
+            head, tail = split_bilingual(answer) if wants_both else (answer, "")
+            return answer, meta, head, tail
+
+        text, data, primary, alt = _ask("")
+
+        # 显式语言模式要"严格对应": 自检没过就追加更硬的指令重试一次
+        notes = ""
+        if mode in _LANGUAGE_RETRY and not language_ok(primary, alt, mode):
+            text, data, primary, alt = _ask(_LANGUAGE_RETRY[mode])
+            notes += (" | retried once for language"
+                      if language_ok(primary, alt, mode)
+                      else " | language check still failing")
 
         elapsed = float(data.get("total_duration") or 0) / 1e9
         # done_reason='length' 但仍有文本 -> 答案是截断的, 在信息行里标出来
-        truncated = (" | truncated (num_predict reached)"
-                     if data.get("done_reason") == "length" else "")
+        if data.get("done_reason") == "length":
+            notes += " | truncated (num_predict reached)"
+        if wants_both and not alt:
+            notes += " | could not split EN/ZH, whole answer is in text"
         info = (
-            f"{payload['model']} | {len(encoded)} frame(s) | "
+            f"{data.get('model') or model} | {len(encoded)} frame(s) | "
             f"prompt {data.get('prompt_eval_count', '?')} tok | "
-            f"output {data.get('eval_count', '?')} tok | {elapsed:.1f}s{truncated}"
+            f"output {data.get('eval_count', '?')} tok | {elapsed:.1f}s{notes}"
         )
-        return {"ui": {"mervyn_ollama_vision": [text, info]}, "result": (text, info)}
+        # 节点上读着方便: both 模式把两个版本一起显示(text / text_alt 仍是分开的)
+        display = primary if not alt else f"{primary}\n\n{alt}"
+        return {"ui": {"mervyn_ollama_vision": [display, info]},
+                "result": (primary, info, alt)}

@@ -106,10 +106,13 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 
 - `images`：要分析的帧。直接接 VHS `Load Video` 的 **IMAGE** 输出（VHS 的 VAE 不要接，否则它第一路会变成 `LATENT`），也可以接任意单张图片
 - `model`：**已拉取**的 Ollama 视觉模型。**模型名字不能证明它真能看图**——用 `ollama show <模型名>` 看 **Capabilities** 里有没有 `vision`。本机实测：`qwen3.5:9b` 有 `vision`，而 `gemma3:1b` / `qwen3:8b` / `gpt-oss:20b` 都没有
-- `prompt`：要问什么。默认是"从这些帧反推一条视频提示词"；想让它输出中文，把默认提示词的最后一句改成 `用中文输出提示词。`
+- `prompt`：要问什么。默认是"从这些帧反推一条视频提示词"
+- `language`：**唯一决定输出语言的开关**，只有四个值——`auto`（默认）原样发送提示词，语言由 prompt / `system` 文本决定（想用别的语言就用它：写一句 `用日语回答。` 即可；直接写中文提示词通常也行，但"镜像输入语言"是倾向、不是保证）；`english` / `chinese` 会把指令追加到**提示词末尾**来强制该语言，这也是它能压过冲突 `system` 的原因（本机 qwen3.5 实测：追加在提示词末尾 3/3 生效，追加到 `system` 0/3）；`both` 要求输出两行带标记的答案并拆开，于是**英文进 `text`、中文进 `text_alt`**
+- `english` / `chinese` / `both` 是**强制而非仅请求**：节点会检查回答的语言，不符就追加更硬的指令**重试一次**；仍旧不符时照常返回答案，并在 `info` 里标注 `language check still failing`——问题会暴露出来，而不是静默通过。（任何大模型都无法做到 100% 确定；本机实测中重试从未需要触发，因为追加的指令位于最后、权重最高。）
 - 抽帧与压缩：按 `max_frames`（默认 6）**在整段视频里等间隔抽帧，且必定包含首尾帧**；每帧再等比缩放到长边 `max_side`（默认 768，填 0 表示保持原尺寸）并编码为 JPEG 后发送。所以 300 帧的视频只发 6 张小图，而不是 300 张原图
 - 其他参数：`ollama_url`（默认 `http://127.0.0.1:11434`，会自动补 `/api/generate`；只填 `主机:端口` 或末尾带 `/` 都能识别）、`system`、`temperature`、`seed`、`num_predict`、`think`、`timeout`
-- 输出：`text`（模型回答，也就是提示词）+ `info`（一行摘要：模型、发送帧数、token 数、耗时）。两者同时直接显示在节点上
+- 输出：`text`（模型回答，也就是提示词；`language=both` 时是英文那份）、`info`（一行摘要：模型、发送帧数、token 数、耗时）、`text_alt`（仅 `language=both` 时有值，是另一种语言）。它们同时显示在节点上——选 `both` 时两个版本会叠在一起显示。`text_alt` 特意加在最后，所以已有的 `text`/`info` 连线不会错位
+- 选了 `both` 但模型没有按 `EN:` / `ZH:` 标记输出时也不会丢内容：整段回答进 `text`，`text_alt` 留空，并在 `info` 里标注 `could not split EN/ZH`
 - 缓存：输入不变时复用缓存，所以调整下游节点不会反复调用大模型。**想换一个结果就改 `seed`**
 - `think` **默认关闭**：在"描述这些帧"这类任务上，推理会大量消耗输出 token（本机同一提示词实测：开启 157 输出 token，关闭仅 2 个），而描述质量没有提升。只对声明了思考能力的模型（如 `qwen3.5`）才有意义；非思考模型会直接报 `does not support thinking`
 - 思考模型会**先**把一部分 `num_predict` 花在推理上，所以 `num_predict` 给小了可能一个字的答案都拿不到；这时节点会明确说明原因，而不是只抛一句 "empty response"。只要答案被截断，`info` 会标记 `truncated (num_predict reached)`

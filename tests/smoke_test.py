@@ -783,12 +783,14 @@ with tempfile.TemporaryDirectory() as svdir:
 # 14. MyOllamaVision: 抽帧 / 编码 / 端点归一化 / 请求体 / 错误路径(不依赖真实 Ollama)
 ov = mod_ov.MyOllamaVision
 ov_types = ov.INPUT_TYPES()
-assert set(ov_types["required"]) == {"images", "model", "prompt"}, ov_types["required"]
+assert set(ov_types["required"]) == {"images", "model", "prompt", "language"}, ov_types["required"]
+assert tuple(ov_types["required"]["language"][0]) == (
+    "auto", "english", "chinese", "both"), ov_types["required"]["language"][0]
 assert set(ov_types["optional"]) == {
     "ollama_url", "max_frames", "max_side", "system", "temperature", "seed",
     "num_predict", "think", "timeout",
 }, ov_types["optional"]
-assert ov.RETURN_NAMES == ("text", "info"), ov.RETURN_NAMES
+assert ov.RETURN_NAMES == ("text", "info", "text_alt"), ov.RETURN_NAMES
 assert ov.OUTPUT_NODE is True
 
 # 出队前校验: 空 model / 空 prompt 都要拦下
@@ -816,6 +818,37 @@ assert "seed" not in pay2["options"] and "system" not in pay2, pay2
 # think 总是显式下发(实测 false 对思考/非思考模型都安全), 默认关闭
 assert pay["think"] is False and pay2["think"] is False
 assert mod_ov.build_payload("m", "p", [], think=True)["think"] is True
+
+# language: 'as written' 完全不动提示词, 其它模式只追加语言指令
+_base = "describe the frames"
+assert mod_ov.apply_language(_base, "auto") == _base
+assert mod_ov.apply_language(_base, "") == _base
+assert mod_ov.apply_language(_base, "ENGLISH").endswith("Answer in English only.")
+assert mod_ov.apply_language(_base, "chinese").endswith("Answer in Chinese only.")
+_both_prompt = mod_ov.apply_language(_base, "both")
+assert _both_prompt.startswith(_base) and "EN:" in _both_prompt and "ZH:" in _both_prompt
+
+# split_bilingual: 正常拆开 / 顺序颠倒也能拆 / 拆不开时整体落到第一路(不丢内容)
+assert mod_ov.split_bilingual("EN: a cat\nZH: 一只猫") == ("a cat", "一只猫")
+assert mod_ov.split_bilingual("ZH: 一只猫\nEN: a cat") == ("a cat", "一只猫")
+assert mod_ov.split_bilingual("EN:\nmulti\nline\nZH: 中文")[0].startswith("multi")
+assert mod_ov.split_bilingual("no labels here") == ("no labels here", "")
+assert mod_ov.split_bilingual("") == ("", "")
+
+# 语言自检: 汉字占比 + 是否符合所选语言
+assert mod_ov.cjk_ratio("") == 0.0
+assert mod_ov.cjk_ratio("all english words") == 0.0
+assert mod_ov.cjk_ratio("全是中文") > 0.5
+assert mod_ov.cjk_ratio("An English line quoting 中文 here") < 0.10
+
+assert mod_ov.language_ok("all english", "", "english")
+assert not mod_ov.language_ok("全是中文", "", "english")
+assert mod_ov.language_ok("全是中文", "", "chinese")
+assert not mod_ov.language_ok("all english", "", "chinese")
+assert mod_ov.language_ok("english", "中文解答", "both")
+assert not mod_ov.language_ok("english", "", "both")            # 没拆开
+assert not mod_ov.language_ok("english", "still english", "both")
+assert mod_ov.language_ok("全是中文", "", "auto")                # auto 不检查
 
 try:
     import base64 as _b64
@@ -870,6 +903,19 @@ class _FakeRequests:
         return _FakeResponse(self._payload)
 
 
+class _FakeSequence(_FakeRequests):
+    """按调用次序返回不同响应, 用来验证"自检没过就重试一次"的逻辑。"""
+
+    def __init__(self, payloads):
+        self._payloads = list(payloads)
+        self.calls = 0
+
+    def post(self, *args, **kwargs):
+        index = min(self.calls, len(self._payloads) - 1)
+        self.calls += 1
+        return _FakeResponse(self._payloads[index])
+
+
 _real_requests = mod_ov.requests
 try:
     mod_ov.requests = _FakeRequests(
@@ -884,6 +930,53 @@ try:
     mod_ov.requests = _FakeRequests({"response": " hello ", "done": True})
     text_ok, data_ok = mod_ov.call_ollama("http://fake/api/generate", {"model": "m"}, 5)
     assert text_ok == "hello" and data_ok["done"] is True, (text_ok, data_ok)
+
+    # language='both' 端到端: 两行回答要分别落到 text 与 text_alt
+    fake_frames = mod_ov.np.ones((3, 8, 8, 3))
+    mod_ov.requests = _FakeRequests(
+        {"response": "EN: a cat on a beach\nZH: 沙滩上的一只猫", "done": True}
+    )
+    out_both = ov().run(fake_frames, "m", "describe", language="both",
+                        max_frames=2, max_side=64)
+    assert out_both["result"][0] == "a cat on a beach", out_both["result"]
+    assert out_both["result"][2] == "沙滩上的一只猫", out_both["result"]
+    assert "a cat on a beach" in out_both["ui"]["mervyn_ollama_vision"][0]
+
+    # 拆不开时: 原文进 text, text_alt 为空, 并在 info 里标注
+    mod_ov.requests = _FakeRequests({"response": "just one paragraph", "done": True})
+    out_plain = ov().run(fake_frames, "m", "describe", language="both",
+                         max_frames=2, max_side=64)
+    assert out_plain["result"][0] == "just one paragraph", out_plain["result"]
+    assert out_plain["result"][2] == "", out_plain["result"]
+    assert "could not split" in out_plain["result"][1], out_plain["result"][1]
+
+    # 显式语言模式: 第一次没按要求 -> 自动重试一次(共 2 次请求)
+    seq = _FakeSequence([
+        {"response": "这两帧都是橙色的。", "done": True},
+        {"response": "Both frames are orange.", "done": True},
+    ])
+    mod_ov.requests = seq
+    out_retry = ov().run(fake_frames, "m", "describe", language="english",
+                         max_frames=2, max_side=64)
+    assert seq.calls == 2, seq.calls
+    assert out_retry["result"][0] == "Both frames are orange.", out_retry["result"]
+    assert "retried once" in out_retry["result"][1], out_retry["result"][1]
+
+    # 重试后仍不符合 -> 保留最新答案, 并在 info 里说明
+    seq2 = _FakeSequence([{"response": "这两帧都是橙色的。", "done": True}])
+    mod_ov.requests = seq2
+    out_bad = ov().run(fake_frames, "m", "describe", language="english",
+                       max_frames=2, max_side=64)
+    assert seq2.calls == 2, seq2.calls
+    assert "still failing" in out_bad["result"][1], out_bad["result"][1]
+
+    # auto 不做语言检查, 也就不会重试
+    seq3 = _FakeSequence([{"response": "这两帧都是橙色的。", "done": True}])
+    mod_ov.requests = seq3
+    out_auto = ov().run(fake_frames, "m", "describe", language="auto",
+                        max_frames=2, max_side=64)
+    assert seq3.calls == 1, seq3.calls
+    assert out_auto["result"][0] == "这两帧都是橙色的。", out_auto["result"]
 finally:
     mod_ov.requests = _real_requests
 
