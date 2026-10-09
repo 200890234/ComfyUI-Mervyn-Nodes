@@ -39,6 +39,13 @@ spec_code_v2 = importlib.util.spec_from_file_location(
 mod_code_v2 = importlib.util.module_from_spec(spec_code_v2)
 spec_code_v2.loader.exec_module(mod_code_v2)
 
+spec_ov = importlib.util.spec_from_file_location(
+    "my_ollama_vision",
+    os.path.join(REPO, "nodes", "my_ollama_vision.py"),
+)
+mod_ov = importlib.util.module_from_spec(spec_ov)
+spec_ov.loader.exec_module(mod_ov)
+
 spec_save = importlib.util.spec_from_file_location(
     "my_save_image",
     os.path.join(REPO, "nodes", "my_save_image.py"),
@@ -773,7 +780,114 @@ with tempfile.TemporaryDirectory() as svdir:
     except ImportError:
         pass
 
-# 14. 结构性防呆: 所有节点的 INPUT_TYPES 输入名必须都能被执行方法接收
+# 14. MyOllamaVision: 抽帧 / 编码 / 端点归一化 / 请求体 / 错误路径(不依赖真实 Ollama)
+ov = mod_ov.MyOllamaVision
+ov_types = ov.INPUT_TYPES()
+assert set(ov_types["required"]) == {"images", "model", "prompt"}, ov_types["required"]
+assert set(ov_types["optional"]) == {
+    "ollama_url", "max_frames", "max_side", "system", "temperature", "seed",
+    "num_predict", "think", "timeout",
+}, ov_types["optional"]
+assert ov.RETURN_NAMES == ("text", "info"), ov.RETURN_NAMES
+assert ov.OUTPUT_NODE is True
+
+# 出队前校验: 空 model / 空 prompt 都要拦下
+assert ov.VALIDATE_INPUTS("qwen2.5vl:7b", "hi") is True
+assert isinstance(ov.VALIDATE_INPUTS("   ", "hi"), str)
+assert isinstance(ov.VALIDATE_INPUTS("m", "  "), str)
+
+# 端点归一化: 常见写法都要落到 /api/generate
+assert mod_ov.build_endpoint("") == "http://127.0.0.1:11434/api/generate"
+assert mod_ov.build_endpoint("http://127.0.0.1:11434") == "http://127.0.0.1:11434/api/generate"
+assert mod_ov.build_endpoint("http://127.0.0.1:11434/") == "http://127.0.0.1:11434/api/generate"
+assert mod_ov.build_endpoint("127.0.0.1:11434") == "http://127.0.0.1:11434/api/generate"
+assert mod_ov.build_endpoint("http://host:1234/api") == "http://host:1234/api/generate"
+assert mod_ov.build_endpoint("http://host:1234/api/generate") == "http://host:1234/api/generate"
+
+# 请求体: seed<0 时不带 seed; system 为空时不带 system
+pay = mod_ov.build_payload("m", "p", ["AAA"], system=" s ", temperature=0.5,
+                           seed=7, num_predict=64)
+assert pay["model"] == "m" and pay["images"] == ["AAA"] and pay["stream"] is False
+assert pay["system"] == "s", pay["system"]
+assert pay["options"] == {"temperature": 0.5, "num_predict": 64, "seed": 7}, pay["options"]
+pay2 = mod_ov.build_payload("m", "p", [], system="", temperature=0.2, seed=-1,
+                            num_predict=512)
+assert "seed" not in pay2["options"] and "system" not in pay2, pay2
+# think 总是显式下发(实测 false 对思考/非思考模型都安全), 默认关闭
+assert pay["think"] is False and pay2["think"] is False
+assert mod_ov.build_payload("m", "p", [], think=True)["think"] is True
+
+try:
+    import base64 as _b64
+    import io as _io
+
+    import torch as _th2
+    from PIL import Image as _Image
+
+    # 抽帧: 少于上限全取; 多于上限等间隔且覆盖首尾
+    frames = _th2.stack([_th2.full((4, 6, 3), i / 10.0) for i in range(10)])
+    assert len(mod_ov.pick_frames(frames, 20)) == 10
+    assert len(mod_ov.pick_frames(frames, 1)) == 1
+    picked = mod_ov.pick_frames(frames, 4)
+    assert [round(float(f.mean()) * 10) for f in picked] == [0, 3, 6, 9], picked
+
+    # 编码: base64 JPEG, 尺寸正确, max_side 生效
+    img = _Image.open(_io.BytesIO(_b64.b64decode(mod_ov.encode_frame(frames[0], 0))))
+    assert img.format == "JPEG" and img.size == (6, 4), (img.format, img.size)
+    wide = _th2.zeros((200, 400, 3))
+    img2 = _Image.open(_io.BytesIO(_b64.b64decode(mod_ov.encode_frame(wide, 100))))
+    assert max(img2.size) == 100, img2.size
+except ImportError:
+    pass
+
+# 连不上 Ollama 时给出可读错误, 而不是静默失败
+try:
+    mod_ov.call_ollama("http://127.0.0.1:9/api/generate", {"model": "m", "prompt": "p"}, 3)
+    raise AssertionError("unreachable Ollama should raise RuntimeError")
+except RuntimeError as e:
+    assert "Ollama" in str(e), e
+
+
+# 用假的 requests 模块构造响应: 思考模型吃光 num_predict 时要给可操作提示
+class _FakeResponse:
+    status_code = 200
+    text = ""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _FakeRequests:
+    exceptions = mod_ov.requests.exceptions
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def post(self, *args, **kwargs):
+        return _FakeResponse(self._payload)
+
+
+_real_requests = mod_ov.requests
+try:
+    mod_ov.requests = _FakeRequests(
+        {"response": "", "done": True, "done_reason": "length", "thinking": "The"}
+    )
+    try:
+        mod_ov.call_ollama("http://fake/api/generate", {"model": "m"}, 5)
+        raise AssertionError("num_predict 耗尽且无文本时应当报错")
+    except RuntimeError as e:
+        assert "num_predict" in str(e), e
+
+    mod_ov.requests = _FakeRequests({"response": " hello ", "done": True})
+    text_ok, data_ok = mod_ov.call_ollama("http://fake/api/generate", {"model": "m"}, 5)
+    assert text_ok == "hello" and data_ok["done"] is True, (text_ok, data_ok)
+finally:
+    mod_ov.requests = _real_requests
+
+# 15. 结构性防呆: 所有节点的 INPUT_TYPES 输入名必须都能被执行方法接收
 # (历史上三次崩溃都源于"加了输入忘了改签名", 这里统一拦住)
 import inspect
 
@@ -787,6 +901,7 @@ for mod, cls_name in (
     (mod_mb, "MyMediaBrowser"),
     (mod_sv, "MySaveVideoToFolder"),
     (mod_me, "MyMaskEditor"),
+    (mod_ov, "MyOllamaVision"),
 ):
     cls = getattr(mod, cls_name, None)
     if cls is None:

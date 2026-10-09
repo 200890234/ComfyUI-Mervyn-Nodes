@@ -23,12 +23,12 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 | `My Load Image Under Path` | 任意目录选图（三段式选择器 + 列式浏览面板 + 内嵌预览 + 尺寸回显），输出 IMAGE + file_path，右键 Open/Save Image |
 | `My Mask Editor` | 任意目录图片上涂蒙版（画/擦/粗细/软度/撤销/Fill/Invert/Clear），蒙版存为图片旁 `<同名>_mask.png`，输出 MASK |
 | `My Media Browser` | 节点内联网格浏览任意目录的图片/视频/子目录（视频自动播放 + 面包屑 + 分页 + 收藏目录），选中即输出 IMAGE/VIDEO |
+| `My Ollama Vision` | 把图片（或 VHS 视频帧）交给本机 Ollama 视觉模型，反推提示词 |
 | `My Save Image` | 把 IMAGE 保存到任意目录，支持重名跳过/覆盖，节点上直接显示保存结果 |
 | `My Save Video to Folder` | 把 VIDEO 保存到任意目录（ComfyUI 自带 writer，兼容则流复制），文件名计数器永不覆盖 |
 | `My Move File` | 把一个或多个文件移动到任意目录，支持重名跳过/覆盖，节点上直接显示移动结果；可直接接 VHS「Video Combine」的 Filenames 输出 |
 | `My Python Code` | 执行一段自定义 Python 代码（V1：固定输入槽），变换数字/字符串输入并输出结果 |
 | `My Python Code V2` | 同一套沙箱与输出，改用 V3 API + Autogrow，输入槽自动增长（`var_0`/`var_1`/…） |
-| `My Example Node` | 示例节点（占位，可删） |
 
 ## My Media Browser
 
@@ -102,6 +102,21 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 - 定位说明：沙箱只防意外，不防对抗。
 - V2 输出说明：核心 V3 API 的 Autogrow 只支持**输入**（没有 `Autogrow.Output`，也没有 `DynamicOutput` 实现类），所以 V2 输出仍是固定的 5 个。动态输出槽需要自写前端 widget，暂不涉及。
 
+## My Ollama Vision
+
+- `images`：要分析的帧。直接接 VHS `Load Video` 的 **IMAGE** 输出（VHS 的 VAE 不要接，否则它第一路会变成 `LATENT`），也可以接任意单张图片
+- `model`：**已拉取**的 Ollama 视觉模型。**模型名字不能证明它真能看图**——用 `ollama show <模型名>` 看 **Capabilities** 里有没有 `vision`。本机实测：`qwen3.5:9b` 有 `vision`，而 `gemma3:1b` / `qwen3:8b` / `gpt-oss:20b` 都没有
+- `prompt`：要问什么。默认是"从这些帧反推一条视频提示词"；想让它输出中文，把默认提示词的最后一句改成 `用中文输出提示词。`
+- 抽帧与压缩：按 `max_frames`（默认 6）**在整段视频里等间隔抽帧，且必定包含首尾帧**；每帧再等比缩放到长边 `max_side`（默认 768，填 0 表示保持原尺寸）并编码为 JPEG 后发送。所以 300 帧的视频只发 6 张小图，而不是 300 张原图
+- 其他参数：`ollama_url`（默认 `http://127.0.0.1:11434`，会自动补 `/api/generate`；只填 `主机:端口` 或末尾带 `/` 都能识别）、`system`、`temperature`、`seed`、`num_predict`、`think`、`timeout`
+- 输出：`text`（模型回答，也就是提示词）+ `info`（一行摘要：模型、发送帧数、token 数、耗时）。两者同时直接显示在节点上
+- 缓存：输入不变时复用缓存，所以调整下游节点不会反复调用大模型。**想换一个结果就改 `seed`**
+- `think` **默认关闭**：在"描述这些帧"这类任务上，推理会大量消耗输出 token（本机同一提示词实测：开启 157 输出 token，关闭仅 2 个），而描述质量没有提升。只对声明了思考能力的模型（如 `qwen3.5`）才有意义；非思考模型会直接报 `does not support thinking`
+- 思考模型会**先**把一部分 `num_predict` 花在推理上，所以 `num_predict` 给小了可能一个字的答案都拿不到；这时节点会明确说明原因，而不是只抛一句 "empty response"。只要答案被截断，`info` 会标记 `truncated (num_predict reached)`
+- 全部走本机 Ollama 的 `POST /api/generate`，不需要 API Key，数据不出本机。前提是 Ollama 正在运行（`ollama serve`）且已拉取视觉模型
+- 首次调用较慢（要加载模型）：本机 `qwen3.5:9b` 处理 2 帧约 10 秒
+- 失败时给明确报错而不是静默失败：连不上、超时、模型不存在（会提示 `ollama pull`）、返回为空，都会抛出可读信息
+
 ## My Load Video Under Path
 
 - `path`：根目录路径（如 `D:/videos`），输入后自动刷新；也可直接填完整视频文件路径（跳过浏览直接加载）
@@ -148,7 +163,6 @@ git clone https://github.com/200890234/ComfyUI-Mervyn-Nodes.git
 
 - `__init__.py` — 插件入口，维护 `NODE_CLASS_MAPPINGS` 与 `WEB_DIRECTORY`
 - `nodes/` — 节点实现，按功能拆分模块
-- `nodes/example.py` — 示例节点，可修改或删除
 - `web/js/` — 前端扩展（动态下拉、节点内预览等界面逻辑）
 - `tests/smoke_test.py` — 免启动冒烟测试：`conda run -n ComfyuiP python tests/smoke_test.py`
 - `pyproject.toml` — Comfy Registry 发布元数据

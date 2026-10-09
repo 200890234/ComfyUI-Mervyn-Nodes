@@ -23,12 +23,12 @@ Once it is published to the Comfy Registry you can also install it by searching 
 | `My Load Image Under Path` | Pick an image from any directory (three-part selector + column browse panel + inline preview + size readout). Outputs IMAGE + file_path; right-click Open/Save Image |
 | `My Mask Editor` | Paint a mask on an image in any directory (paint/erase/size/softness/undo/Fill/Invert/Clear). The mask is saved next to the image as `<name>_mask.png`. Outputs MASK |
 | `My Media Browser` | In-node grid browser for images/videos/subfolders in any directory (autoplaying video tiles + breadcrumbs + paging + favourite folders). Selecting outputs IMAGE/VIDEO |
+| `My Ollama Vision` | Send images (or VHS video frames) to a local Ollama vision model and get a prompt back — e.g. reverse-engineer a video prompt |
 | `My Save Image` | Save an IMAGE to any directory, skipping or overwriting on name clashes. The result is shown on the node |
 | `My Save Video to Folder` | Save a VIDEO to any directory (ComfyUI's own writer, stream-copies when compatible). The filename counter never overwrites |
 | `My Move File` | Move one or more files to any directory, skipping or overwriting on name clashes. The result is shown on the node. Also accepts VHS "Video Combine" Filenames output directly |
 | `My Python Code` | Run a custom Python snippet (V1: fixed input slots) that transforms numeric/string inputs and returns results |
 | `My Python Code V2` | Same sandbox and outputs, but built on the V3 API with auto-growing input slots (`var_0`, `var_1`, ...) |
-| `My Example Node` | Example node (placeholder, safe to delete) |
 
 ## My Media Browser
 
@@ -104,6 +104,21 @@ They coexist: deleting either one does not affect the other (the shared code liv
 - Scope note: the sandbox guards against accidents, not adversarial code.
 - V2 output note: the core V3 API only offers Autogrow for **inputs** (there is no `Autogrow.Output`, and no `DynamicOutput` implementation), so V2 keeps the same five fixed outputs. Dynamic output slots would need a custom front-end widget — out of scope for now.
 
+## My Ollama Vision
+
+- `images`: the frames to analyse. Connect VHS `Load Video`'s **IMAGE** output directly (leave VHS's VAE unconnected, otherwise its first output becomes `LATENT`), or any single image
+- `model`: an Ollama vision model that is **already pulled**. A model's name does not prove it can see images — check with `ollama show <model>` and look for `vision` under **Capabilities**. Verified on this machine: `qwen3.5:9b` reports `vision`, while `gemma3:1b` / `qwen3:8b` / `gpt-oss:20b` do not
+- `prompt`: what to ask. The default reverse-engineers one video prompt from the frames; to get the answer in another language, add a sentence such as `Answer in Chinese.` to the prompt
+- Frame handling: `max_frames` frames (default 6) are sampled **evenly across the clip, always including the first and last frame**; each is then scaled so its longest edge is `max_side` (default 768, `0` keeps the original) and encoded as JPEG. A 300-frame clip therefore sends 6 small images instead of 300 full-size ones
+- Other options: `ollama_url` (default `http://127.0.0.1:11434`; `/api/generate` is appended automatically, and a bare `host:port` or a trailing `/` are both accepted), `system`, `temperature`, `seed`, `num_predict`, `think`, `timeout`
+- Outputs: `text` (the model's answer — the prompt) + `info` (one line: model, frames sent, token counts, elapsed time). Both are also rendered on the node itself
+- Caching: the answer is reused while the inputs stay unchanged, so tweaking downstream nodes does not re-call the model. **Change `seed` to get a different sample**
+- `think` is **off by default**: on a "describe these frames" task the reasoning burns output tokens (measured on this machine with the same prompt: 157 output tokens with it on vs 2 with it off) without improving the description. Turn it on only for models that advertise thinking (e.g. `qwen3.5`) — non-thinking models reject it with `does not support thinking`
+- A thinking model spends part of `num_predict` on its reasoning **before** writing anything, so a small `num_predict` can come back with no answer at all; the node then says exactly that instead of a bare "empty response". Whenever an answer was cut off, `info` is marked `truncated (num_predict reached)`
+- Everything goes to your local Ollama via `POST /api/generate` — no API key, nothing leaves the machine. Ollama must be running (`ollama serve`) with a vision model pulled
+- The first call is slow because the model has to load (on this machine `qwen3.5:9b` took ~10 s for 2 frames)
+- Failures are reported, not silent: unreachable server, timeout, unknown model (the message suggests `ollama pull`) and empty responses each raise a readable error
+
 ## My Load Video Under Path
 
 - `path`: root directory path (e.g. `D:/videos`); refreshes automatically once entered. A full video file path is also accepted (skips browsing and loads directly)
@@ -150,7 +165,6 @@ They coexist: deleting either one does not affect the other (the shared code liv
 
 - `__init__.py` — plugin entry point, maintains `NODE_CLASS_MAPPINGS` and `WEB_DIRECTORY`
 - `nodes/` — node implementations, split into modules by feature
-- `nodes/example.py` — example node, modify or delete it freely
 - `web/js/` — frontend extensions (dynamic dropdowns, in-node previews and other UI logic)
 - `tests/smoke_test.py` — smoke test that needs no running server: `conda run -n ComfyuiP python tests/smoke_test.py`
 - `pyproject.toml` — Comfy Registry publishing metadata
